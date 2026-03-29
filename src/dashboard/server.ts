@@ -134,7 +134,7 @@ export function startDashboardServer(port = 3200): Promise<DashboardServer> {
       }
     });
     
-    server.listen(port, () => {
+    server.listen(port, '0.0.0.0', () => {
       logger.info({ port }, 'Dashboard server started');
       
       resolve({
