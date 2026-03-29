@@ -1,0 +1,62 @@
+{
+  "name": "@botsquad/bscs",
+  "version": "0.1.0",
+  "description": "Bot Squad Command Suite — CLI for managing fleets of OpenClaw AI agents",
+  "type": "module",
+  "main": "dist/src/cli/index.js",
+  "bin": {
+    "bscs": "./dist/bin/bscs.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch bin/bscs.ts",
+    "lint": "eslint src/ bin/ test/",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "test:coverage": "vitest run --coverage",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "openclaw",
+    "ai",
+    "fleet",
+    "docker",
+    "cli"
+  ],
+  "author": "The Bot Club",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "chalk": "^5.4.0",
+    "commander": "^13.0.0",
+    "dockerode": "^4.0.10",
+    "pino": "^9.6.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^19.0.0",
+    "@commitlint/config-conventional": "^19.0.0",
+    "@types/dockerode": "^3.3.47",
+    "@types/node": "^22.0.0",
+    "eslint": "^9.0.0",
+    "prettier": "^3.4.0",
+    "semantic-release": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thebotclub/bscs.git"
+  },
+  "bugs": {
+    "url": "https://github.com/thebotclub/bscs/issues"
+  },
+  "homepage": "https://github.com/thebotclub/bscs#readme"
+}

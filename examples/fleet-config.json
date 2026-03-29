@@ -1,0 +1,138 @@
+{
+  "version": "1.0",
+  "fleet": {
+    "name": "production-fleet",
+    "controller": "mini4",
+    "domain": "fleet.example.com"
+  },
+  "machines": {
+    "mini4": {
+      "host": "mini4.local",
+      "user": "hani",
+      "role": "controller",
+      "port": 22
+    },
+    "mini1": {
+      "host": "mini1.local",
+      "user": "hani",
+      "role": "worker",
+      "port": 22
+    },
+    "mini2": {
+      "host": "mini2.local",
+      "user": "hani",
+      "role": "worker",
+      "port": 22
+    },
+    "dell-c4140": {
+      "host": "gpu.local",
+      "user": "hani",
+      "role": "gpu",
+      "port": 22
+    }
+  },
+  "docker": {
+    "image": "ghcr.io/thebotclub/bscs:latest",
+    "registry": "ghcr.io",
+    "security": {
+      "noNewPrivileges": true,
+      "capDropAll": true,
+      "tmpfs": true,
+      "pidsLimit": 256,
+      "readOnlyRootfs": false
+    },
+    "resources": {
+      "coding": {
+        "memory": "4g",
+        "pidsLimit": 512
+      },
+      "review": {
+        "memory": "2g",
+        "pidsLimit": 256
+      },
+      "brain": {
+        "memory": "2g",
+        "pidsLimit": 128
+      },
+      "ops": {
+        "memory": "2g",
+        "pidsLimit": 256
+      },
+      "default": {
+        "memory": "2g",
+        "pidsLimit": 256
+      }
+    }
+  },
+  "defaults": {
+    "image": "ghcr.io/thebotclub/bscs:latest",
+    "portRange": {
+      "start": 19000,
+      "end": 19999
+    }
+  },
+  "models": {
+    "providers": {
+      "anthropic": {
+        "type": "anthropic",
+        "apiKey": "op://botsquad/anthropic/api_key",
+        "enabled": true
+      },
+      "openai": {
+        "type": "openai",
+        "apiKey": "op://botsquad/openai/api_key",
+        "enabled": true
+      },
+      "ollama": {
+        "type": "ollama",
+        "baseUrl": "http://gpu.local:11434",
+        "local": true,
+        "gpu": true,
+        "enabled": true
+      }
+    },
+    "defaults": {
+      "coding": "claude-sonnet-4",
+      "brain": "claude-opus-4",
+      "review": "claude-sonnet-4",
+      "ops": "claude-haiku-3.5"
+    },
+    "fallbacks": {
+      "claude-sonnet-4": ["claude-3.5-sonnet", "gpt-4-turbo"],
+      "claude-opus-4": ["claude-3-opus", "gpt-4"]
+    },
+    "pricing": {
+      "claude-opus-4": {
+        "inputPer1k": 0.015,
+        "outputPer1k": 0.075
+      },
+      "claude-sonnet-4": {
+        "inputPer1k": 0.003,
+        "outputPer1k": 0.015
+      },
+      "claude-haiku-3.5": {
+        "inputPer1k": 0.001,
+        "outputPer1k": 0.005
+      }
+    }
+  },
+  "secrets": {
+    "refs": {
+      "anthropic_key": {
+        "ref": "op://botsquad/anthropic/api_key",
+        "provider": "anthropic"
+      },
+      "openai_key": {
+        "ref": "op://botsquad/openai/api_key",
+        "provider": "openai"
+      }
+    }
+  },
+  "budget": {
+    "daily": 50,
+    "weekly": 300,
+    "monthly": 1000,
+    "alertThreshold": 0.8
+  },
+  "agents": {}
+}

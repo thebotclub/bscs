@@ -1,0 +1,26 @@
+{
+  "mode": "quick",
+  "tdd": {
+    "enabled": true,
+    "strict": true
+  },
+  "endless": {
+    "enabled": true,
+    "contextThreshold": 80
+  },
+  "hooks": {
+    "fileChecker": true,
+    "tddEnforcer": true,
+    "contextMonitor": true,
+    "auditLogger": true
+  },
+  "vault": {
+    "enabled": false
+  },
+  "qualityGates": {
+    "preCommit": true,
+    "postImplementation": true,
+    "preMerge": true
+  },
+  "enforcementLevel": "strict"
+}
