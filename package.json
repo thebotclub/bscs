@@ -19,7 +19,7 @@
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:coverage": "vitest run --coverage",
     "prepare": "npm run build",
-    "postbuild": "node scripts/postbuild.js"
+    "postbuild": "node scripts/postbuild.cjs"
   },
   "keywords": [
     "openclaw",
