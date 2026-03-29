@@ -19,7 +19,7 @@
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:coverage": "vitest run --coverage",
     "prepare": "npm run build",
-    "postbuild": "node -e \"const fs=require(\"fs\");const f=\"dist/bin/bscs.js\";let s=fs.readFileSync(f,\"utf8\");s=s.replace(\"#!/usr/bin/env tsx\",\"#!/usr/bin/env node\");fs.writeFileSync(f,s);fs.chmodSync(f,0o755);\""
+    "postbuild": "node scripts/postbuild.js"
   },
   "keywords": [
     "openclaw",
