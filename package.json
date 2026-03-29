@@ -1,7 +1,7 @@
 {
   "name": "@botsquad/bscs",
   "version": "0.1.0",
-  "description": "Bot Squad Command Suite — CLI for managing fleets of OpenClaw AI agents",
+  "description": "Bot Squad Command Suite \u2014 CLI for managing fleets of OpenClaw AI agents",
   "type": "module",
   "main": "dist/src/cli/index.js",
   "bin": {
@@ -18,7 +18,8 @@
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:coverage": "vitest run --coverage",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "postbuild": "sed -i '' '1s|#!/usr/bin/env tsx|#!/usr/bin/env node|' dist/bin/bscs.js && chmod +x dist/bin/bscs.js"
   },
   "keywords": [
     "openclaw",
