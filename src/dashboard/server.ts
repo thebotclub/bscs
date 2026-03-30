@@ -1066,13 +1066,29 @@ function getEmbeddedHtml(): string {
 
 <script>
 // ===================== Safe Fetch Helper =====================
-async function safeFetchJson(url, options) {
-  const res = await fetch(url, options);
-  const text = await res.text();
-  if (!text) throw new Error('Empty response from server');
-  const data = JSON.parse(text);
-  if (!res.ok && !data.ok && !data.message) throw new Error('HTTP ' + res.status);
-  return data;
+async function safeFetchJson(url, options, retries = 2) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      const res = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(timeout);
+      const text = await res.text();
+      if (!text) {
+        if (attempt < retries) { await new Promise(r => setTimeout(r, 1000)); continue; }
+        throw new Error('Empty response from server');
+      }
+      const data = JSON.parse(text);
+      if (!res.ok && !data.ok && !data.message) throw new Error('HTTP ' + res.status);
+      return data;
+    } catch (err) {
+      if (attempt < retries && (err.name === 'AbortError' || err.message.includes('Empty') || err.message.includes('JSON'))) {
+        await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 // ===================== State =====================
@@ -1092,6 +1108,8 @@ async function fetchFleet() {
     renderAll();
   } catch (err) {
     console.error('Fleet fetch error:', err);
+    const tbody = document.querySelector('.agent-table tbody');
+    if (tbody) tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:2rem;color:var(--error)">Failed to load data: ' + err.message + '<br><button onclick="refreshData()" style="margin-top:0.5rem">↻ Retry</button></td></tr>';
     showToast('Failed to load fleet data: ' + err.message, 'error');
   }
 }
