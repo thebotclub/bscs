@@ -80,6 +80,67 @@ async function executeAgentCommand(agentName: string, command: string, config: B
   }
 }
 
+// Agent info cache: agent name → { data, timestamp }
+const agentInfoCache = new Map<string, { data: any; timestamp: number }>();
+const AGENT_INFO_CACHE_TTL = 60000; // 60 seconds
+
+async function fetchAgentInfo(agentName: string, agentConfig: any, config: BscsConfig): Promise<any> {
+  // Check cache first
+  const cached = agentInfoCache.get(agentName);
+  if (cached && (Date.now() - cached.timestamp) < AGENT_INFO_CACHE_TTL) {
+    return cached.data;
+  }
+
+  const runtime = agentConfig.runtime || 'docker';
+  const containerName = agentConfig.container || `openclaw_${agentName}`;
+  const machine = agentConfig.machine || 'localhost';
+
+  let cmd: string;
+  if (runtime === 'docker') {
+    // Read config from inside the container
+    const nodeScript = `const c=JSON.parse(require("fs").readFileSync("/home/node/.openclaw/openclaw.json","utf8"));const ch=c.channels||{};console.log(JSON.stringify({identity:c.identity||{},gateway_port:(c.gateway||{}).port,model:(c.models||{}).default,channels:Object.keys(ch).map(k=>({name:k,enabled:ch[k].enabled!==false}))}))`;
+    cmd = `export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"; docker exec ${containerName} node -e '${nodeScript.replace(/'/g, "'\\''")}'`;
+  } else {
+    // Native agent — read config file directly
+    const configPath = agentName === 'main'
+      ? `~/.openclaw/openclaw.json`
+      : `~/.openclaw-${agentName}/openclaw.json`;
+    cmd = `cat ${configPath} | python3 -c "import sys,json;c=json.load(sys.stdin);ch=c.get('channels',{});print(json.dumps({'identity':c.get('identity',{}),'gateway_port':(c.get('gateway') or {}).get('port'),'model':(c.get('models') or {}).get('default'),'channels':[{'name':k,'enabled':ch[k].get('enabled',True) if isinstance(ch[k],dict) else True} for k in ch]}))"`;
+  }
+
+  const result = await executeAgentCommand(agentName, cmd, config);
+
+  const info: any = {
+    name: agentName,
+    machine: machine,
+    machineName: getMachineName(machine, config),
+    runtime,
+    container: runtime === 'docker' ? containerName : undefined,
+    role: agentConfig.role,
+    ports: agentConfig.ports,
+  };
+
+  if (result.ok && result.output) {
+    try {
+      const parsed = JSON.parse(result.output);
+      info.identity = parsed.identity;
+      info.gateway_port = parsed.gateway_port;
+      info.model = parsed.model || agentConfig.model;
+      info.channels = parsed.channels;
+    } catch {
+      // Failed to parse — return basic info
+      info.configError = 'Failed to parse agent config';
+    }
+  } else {
+    info.configError = result.output || 'Failed to read agent config';
+  }
+
+  // Cache the result
+  agentInfoCache.set(agentName, { data: info, timestamp: Date.now() });
+
+  return info;
+}
+
 function getDockerCommand(action: string, containerName: string): string {
   const prefix = 'export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH" && ';
   switch (action) {
@@ -266,6 +327,26 @@ export function startDashboardServer(port = 3200): Promise<DashboardServer> {
             return;
           }
           
+          // GET /api/agent/:name/info — on-demand agent details (channels, identity, gateway port)
+          const agentInfoMatch = url.match(/^\/api\/agent\/([a-z0-9-]+)\/info$/);
+          if (agentInfoMatch && method === 'GET') {
+            const agentName = agentInfoMatch[1]!;
+            const config = loadConfig();
+            const agent = (config.agents as any)?.[agentName];
+            if (!agent) {
+              jsonResponse(res, { ok: false, message: 'Agent not found' }, 404);
+              return;
+            }
+
+            try {
+              const info = await fetchAgentInfo(agentName, agent, config);
+              jsonResponse(res, { ok: true, ...info });
+            } catch (err) {
+              jsonResponse(res, { ok: false, message: (err as Error).message }, 500);
+            }
+            return;
+          }
+
           // Agent-specific routes: /api/agent/:name/action
           const agentActionMatch = url.match(/^\/api\/agent\/([a-z0-9-]+)\/(start|stop|restart|logs)$/);
           if (agentActionMatch) {
@@ -754,6 +835,21 @@ function getEmbeddedHtml(): string {
     }
     .runtime-badge.docker::before { content: '🐳 '; }
     .runtime-badge.native::before { content: '💻 '; }
+    /* Channel badge */
+    .channel-badge {
+      display: inline-flex; align-items: center; gap: 3px;
+      padding: 2px 8px; border-radius: 10px; font-size: 0.7rem; font-weight: 500;
+      border: 1px solid; margin: 2px;
+    }
+    .channel-badge.telegram { color: #29b6f6; border-color: rgba(41,182,246,0.3); background: rgba(41,182,246,0.08); }
+    .channel-badge.whatsapp { color: #66bb6a; border-color: rgba(102,187,106,0.3); background: rgba(102,187,106,0.08); }
+    .channel-badge.discord { color: #7289da; border-color: rgba(114,137,218,0.3); background: rgba(114,137,218,0.08); }
+    .channel-badge.slack { color: #e01e5a; border-color: rgba(224,30,90,0.3); background: rgba(224,30,90,0.08); }
+    .channel-badge.disabled { opacity: 0.4; }
+    /* Info grid */
+    .info-grid { display: grid; grid-template-columns: 120px 1fr; gap: 0.4rem 1rem; font-size: 0.85rem; }
+    .info-grid .info-label { color: var(--text-dim); font-weight: 500; }
+    .info-grid .info-value { color: var(--text); }
     /* Action buttons */
     .actions { display: flex; gap: 3px; }
     .action-btn {
@@ -1076,6 +1172,19 @@ function getEmbeddedHtml(): string {
     </div>
   </div>
 
+  <!-- Agent Info Modal -->
+  <div class="modal-overlay" id="agent-info-modal">
+    <div class="modal" style="max-width:550px;">
+      <div class="modal-header">
+        <h2>🤖 <span id="agent-info-title">Agent Details</span></h2>
+        <button class="modal-close" onclick="closeModal('agent-info-modal')">✕</button>
+      </div>
+      <div class="modal-body" id="agent-info-content">
+        <div style="text-align:center;padding:2rem;color:var(--text-dim);"><span class="spinner"></span> Loading agent info…</div>
+      </div>
+    </div>
+  </div>
+
   <!-- Doctor Modal -->
   <div class="modal-overlay" id="doctor-modal">
     <div class="modal" style="max-width:850px;">
@@ -1264,7 +1373,7 @@ function renderAgents() {
     const portsStr = a.ports ? [a.ports.gateway, a.ports.remote].filter(Boolean).join('/') || '-' : '-';
 
     return '<tr data-agent="' + a.name + '">' +
-      '<td><strong>' + esc(a.name) + '</strong></td>' +
+      '<td><strong><a href="#" onclick="showAgentInfo(\\'' + a.name + '\\');return false;" style="color:var(--blue);text-decoration:none;">' + esc(a.name) + '</a></strong></td>' +
       '<td><span class="status-badge ' + (a.status || 'unknown') + '"><span class="status-dot"></span>' + esc(a.status || 'unknown') + '</span></td>' +
       '<td><span class="role-badge ' + (a.role || 'custom') + '">' + esc(a.role || '-') + '</span></td>' +
       '<td><span class="runtime-badge ' + (a.runtime || 'docker') + '">' + esc(a.runtime || 'docker') + '</span></td>' +
@@ -1403,6 +1512,112 @@ async function showLogs(name) {
   } catch (err) {
     document.getElementById('logs-content').textContent = 'Error: ' + err.message;
   }
+}
+
+// ===================== Agent Info =====================
+async function showAgentInfo(name) {
+  document.getElementById('agent-info-title').textContent = name;
+  document.getElementById('agent-info-content').innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-dim);"><span class="spinner"></span> Loading agent info…</div>';
+  openModal('agent-info-modal');
+
+  // Show basic info from fleet data immediately
+  var agent = fleetData && fleetData.agents && fleetData.agents.find(function(a) { return a.name === name; });
+
+  try {
+    var data = await safeFetchJson('/api/agent/' + name + '/info');
+    if (!data.ok) {
+      renderAgentInfoBasic(agent, data.message || 'Failed to load details');
+      return;
+    }
+    renderAgentInfoFull(agent, data);
+  } catch (err) {
+    renderAgentInfoBasic(agent, err.message);
+  }
+}
+
+function channelIcon(name) {
+  var icons = { telegram: '📱', whatsapp: '💬', discord: '🎮', slack: '💼', signal: '🔒', matrix: '🟢' };
+  return icons[name.toLowerCase()] || '📡';
+}
+
+function channelLabel(name) {
+  var labels = { telegram: 'TG', whatsapp: 'WA', discord: 'DC', slack: 'Slack', signal: 'Signal', matrix: 'Matrix' };
+  return labels[name.toLowerCase()] || name;
+}
+
+function renderAgentInfoBasic(agent, errorMsg) {
+  var html = '<div class="info-grid">';
+  if (agent) {
+    html += '<div class="info-label">Status</div><div class="info-value"><span class="status-badge ' + (agent.status || 'unknown') + '"><span class="status-dot"></span>' + esc(agent.status || 'unknown') + '</span></div>';
+    html += '<div class="info-label">Machine</div><div class="info-value">' + esc(agent.machineName || agent.machine || '-') + '</div>';
+    html += '<div class="info-label">Runtime</div><div class="info-value"><span class="runtime-badge ' + (agent.runtime || 'docker') + '">' + esc(agent.runtime || 'docker') + '</span></div>';
+    html += '<div class="info-label">Role</div><div class="info-value"><span class="role-badge ' + (agent.role || 'custom') + '">' + esc(agent.role || '-') + '</span></div>';
+    if (agent.ports) html += '<div class="info-label">Ports</div><div class="info-value" style="font-family:monospace;">' + (agent.ports.gateway || '-') + ' / ' + (agent.ports.remote || '-') + '</div>';
+  }
+  html += '</div>';
+  if (errorMsg) html += '<div style="margin-top:1rem;padding:0.5rem;background:rgba(248,81,73,0.1);border-radius:6px;color:var(--red);font-size:0.8rem;">⚠️ ' + esc(errorMsg) + '</div>';
+  document.getElementById('agent-info-content').innerHTML = html;
+}
+
+function renderAgentInfoFull(agent, data) {
+  var html = '<div class="info-grid">';
+
+  // Identity
+  if (data.identity && (data.identity.name || data.identity.emoji)) {
+    html += '<div class="info-label">Identity</div><div class="info-value">' + esc((data.identity.emoji || '') + ' ' + (data.identity.name || data.name)) + '</div>';
+  }
+
+  // Status
+  if (agent) {
+    html += '<div class="info-label">Status</div><div class="info-value"><span class="status-badge ' + (agent.status || 'unknown') + '"><span class="status-dot"></span>' + esc(agent.status || 'unknown') + '</span></div>';
+  }
+
+  // Machine
+  html += '<div class="info-label">Machine</div><div class="info-value">' + esc(data.machineName || data.machine || '-') + '</div>';
+
+  // Runtime + container
+  html += '<div class="info-label">Runtime</div><div class="info-value"><span class="runtime-badge ' + (data.runtime || 'docker') + '">' + esc(data.runtime || 'docker') + '</span>';
+  if (data.container) html += ' <span style="color:var(--text-dim);font-size:0.75rem;">(' + esc(data.container) + ')</span>';
+  html += '</div>';
+
+  // Role
+  html += '<div class="info-label">Role</div><div class="info-value"><span class="role-badge ' + (data.role || 'custom') + '">' + esc(data.role || '-') + '</span></div>';
+
+  // Gateway port
+  var gwPort = data.gateway_port || (data.ports && data.ports.gateway) || '-';
+  html += '<div class="info-label">Gateway Port</div><div class="info-value" style="font-family:monospace;">' + esc(String(gwPort)) + '</div>';
+
+  // Ports
+  if (data.ports) {
+    html += '<div class="info-label">Ports (GW/Remote)</div><div class="info-value" style="font-family:monospace;">' + (data.ports.gateway || '-') + ' / ' + (data.ports.remote || '-') + '</div>';
+  }
+
+  // Model
+  if (data.model) {
+    html += '<div class="info-label">Model</div><div class="info-value" style="font-family:monospace;font-size:0.8rem;">' + esc(data.model) + '</div>';
+  }
+
+  html += '</div>';
+
+  // Channels
+  if (data.channels && data.channels.length > 0) {
+    html += '<div style="margin-top:1rem;"><div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:0.4rem;font-weight:500;">CHANNELS</div><div>';
+    data.channels.forEach(function(ch) {
+      var disabledClass = ch.enabled ? '' : ' disabled';
+      var lowerName = (ch.name || '').toLowerCase();
+      html += '<span class="channel-badge ' + esc(lowerName) + disabledClass + '">' + channelIcon(ch.name) + ' ' + channelLabel(ch.name) + (ch.enabled ? '' : ' (off)') + '</span>';
+    });
+    html += '</div></div>';
+  } else if (data.channels && data.channels.length === 0) {
+    html += '<div style="margin-top:1rem;color:var(--text-dim);font-size:0.8rem;">No channels configured</div>';
+  }
+
+  // Config error
+  if (data.configError) {
+    html += '<div style="margin-top:1rem;padding:0.5rem;background:rgba(210,153,34,0.1);border-radius:6px;color:var(--yellow);font-size:0.8rem;">⚠️ ' + esc(data.configError) + '</div>';
+  }
+
+  document.getElementById('agent-info-content').innerHTML = html;
 }
 
 // ===================== Create Agent =====================

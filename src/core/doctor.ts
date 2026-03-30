@@ -357,9 +357,10 @@ async function checkAgentGateway(agentName: string, agentConfig: any, config: Bs
 
   let cmd: string;
   if (runtime === 'docker') {
-    // For Docker agents, check healthz INSIDE the container on internal port 18789
-    // The mapped host port is typically the remote dashboard, not the gateway healthz
-    const dockerExec = `${pathPrefix}docker exec ${containerName} wget -q -O- http://127.0.0.1:18789/healthz 2>/dev/null || ${pathPrefix}docker exec ${containerName} curl -s --max-time 3 http://127.0.0.1:18789/healthz 2>/dev/null`;
+    // For Docker agents, check healthz INSIDE the container on the agent's actual gateway port
+    // Each container may use a different port (not always 18789)
+    const internalPort = gwPort;
+    const dockerExec = `${pathPrefix}docker exec ${containerName} wget -q -O- http://127.0.0.1:${internalPort}/healthz 2>&1 || ${pathPrefix}docker exec ${containerName} curl -s --max-time 3 http://127.0.0.1:${internalPort}/healthz 2>&1`;
     cmd = remoteOrLocal(machine, dockerExec, config);
   } else {
     // For native agents, curl directly on the gateway port
@@ -369,9 +370,19 @@ async function checkAgentGateway(agentName: string, agentConfig: any, config: Bs
   }
 
   const result = await executeCommand(cmd);
-  if (result.ok && (result.output.includes('"ok"') || result.output.includes('"live"') || result.output.includes('status'))) {
+  const output = (result.output || '').toLowerCase();
+
+  // Check for proper healthz JSON response (newer OpenClaw versions)
+  if (result.ok && (output.includes('"ok"') || output.includes('"live"') || output.includes('"status"'))) {
     return { category: 'agent', target: agentName, name: 'Gateway', status: 'ok', message: 'Responding' };
   }
+
+  // Check for control UI HTML response (older OpenClaw versions without /healthz endpoint)
+  // These return the control UI HTML on all routes, which means the gateway IS running
+  if (result.ok && (output.includes('<!doctype') || output.includes('openclaw-app'))) {
+    return { category: 'agent', target: agentName, name: 'Gateway', status: 'ok', message: 'Responding (control UI)' };
+  }
+
   const ft = getFixTarget(machine, config);
   if (runtime === 'docker') {
     return { category: 'agent', target: agentName, name: 'Gateway', status: 'error', message: 'Not responding',

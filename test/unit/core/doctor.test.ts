@@ -270,6 +270,63 @@ describe('Fleet Doctor', () => {
     });
   });
 
+  describe('gateway health check', () => {
+    it('should detect old OpenClaw versions returning control UI HTML', async () => {
+      setupExec({
+        'docker inspect': { ok: true, output: 'running|2024-01-01T00:00:00Z|healthy' },
+        'docker exec': { ok: true, output: '<!doctype html><html><head></head><body><openclaw-app></openclaw-app></body></html>' },
+        'docker ps': { ok: true, output: '' },
+      });
+
+      const configWithAgent: BscsConfig = {
+        ...baseConfig,
+        agents: {
+          'old-agent': { name: 'old-agent', role: 'coding', machine: 'localhost', runtime: 'docker', template: 'custom', container: 'openclaw_old-agent', ports: { gateway: 19000 } },
+        },
+      };
+
+      const { runDoctor } = await import('../../../src/core/doctor.js');
+      const result = await runDoctor(configWithAgent, false);
+
+      const gwCheck = result.checks.find(c => c.category === 'agent' && c.name === 'Gateway');
+      expect(gwCheck).toBeDefined();
+      expect(gwCheck!.status).toBe('ok');
+      expect(gwCheck!.message).toBe('Responding (control UI)');
+    });
+
+    it('should use configured gateway port for Docker agents', async () => {
+      const capturedCommands: string[] = [];
+      mockExec.mockImplementation((cmd: string, _opts: any, callback: Function) => {
+        capturedCommands.push(cmd);
+        if (cmd.includes('docker inspect')) {
+          callback(null, 'running|2024-01-01T00:00:00Z|healthy', '');
+        } else if (cmd.includes('docker exec')) {
+          callback(null, '{"ok":true,"status":"live"}', '');
+        } else if (cmd.includes('docker ps')) {
+          callback(null, '', '');
+        } else {
+          callback(null, '', '');
+        }
+      });
+
+      const configWithAgent: BscsConfig = {
+        ...baseConfig,
+        agents: {
+          'custom-port': { name: 'custom-port', role: 'coding', machine: 'localhost', runtime: 'docker', template: 'custom', container: 'openclaw_custom-port', ports: { gateway: 19004 } },
+        },
+      };
+
+      const { runDoctor } = await import('../../../src/core/doctor.js');
+      await runDoctor(configWithAgent, false);
+
+      // Verify the docker exec command uses port 19004, not 18789
+      const gwCmd = capturedCommands.find(c => c.includes('docker exec') && c.includes('healthz'));
+      expect(gwCmd).toBeDefined();
+      expect(gwCmd).toContain('19004');
+      expect(gwCmd).not.toContain('18789');
+    });
+  });
+
   describe('machine status tracking', () => {
     it('should track machine online/offline status', async () => {
       setupExec({
