@@ -1658,7 +1658,7 @@ async function runDoctor() {
         if (c.details) html += ' <span style="opacity:0.7;">(' + esc(c.details) + ')</span>';
         if (c.fix && c.fixCommand) {
           var btnClass = c.autoFixable ? 'btn-primary' : '';
-          html += ' <button class="btn btn-sm ' + btnClass + '" style="font-size:0.7rem;padding:1px 6px;margin-left:4px;" onclick="fixDoctorCheck(\'' + esc(c.fixCommand).replace(/'/g, "\\\\'") + '\',\'' + esc(c.fixTarget || 'local') + '\',this)" title="' + esc(c.fix) + '">🔧 Fix</button>';
+          html += ' <button class="btn btn-sm ' + btnClass + '" style="font-size:0.7rem;padding:1px 6px;margin-left:4px;" onclick="fixDoctorCheck(\\'' + esc(c.fixCommand).replace(/'/g, "\\\\'") + '\\',\\'' + esc(c.fixTarget || 'local') + '\\',this)" title="' + esc(c.fix) + '">🔧 Fix</button>';
         } else if (c.fix) {
           html += ' <span style="color:var(--blue);font-size:0.7rem;" title="' + esc(c.fix) + '">💡 ' + esc(c.fix) + '</span>';
         }
