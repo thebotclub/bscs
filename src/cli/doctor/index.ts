@@ -2,6 +2,8 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import { execSync } from 'child_process';
 import { createLogger } from '../../util/logger.js';
+import { loadConfig } from '../../core/config.js';
+import { runDoctor, type DoctorResult } from '../../core/doctor.js';
 
 const logger = createLogger('doctor');
 
@@ -123,11 +125,146 @@ function formatResult(result: CheckResult): string {
   return output;
 }
 
+// =============================================================================
+// Fleet Doctor Formatting
+// =============================================================================
+
+const STATUS_ICONS: Record<string, string> = {
+  ok: chalk.green('✓'),
+  warn: chalk.yellow('⚠'),
+  error: chalk.red('✗'),
+  critical: chalk.red.bold('✗'),
+  skip: chalk.gray('⊘'),
+};
+
+function getStatusIcon(status: string): string {
+  return STATUS_ICONS[status] || chalk.gray('?');
+}
+
+function getMachineName(host: string, config: any): string {
+  const machine = config.machines?.[host];
+  return machine?.sshAlias || host;
+}
+
+function formatFleetDoctor(result: DoctorResult, config: any): void {
+  const modeLabel = result.mode === 'deep' ? 'deep mode' : 'quick mode';
+  console.log();
+  console.log(chalk.bold(`🩺 Fleet Doctor (${modeLabel})`));
+  console.log();
+
+  // Group checks by machine
+  const machines = new Set<string>();
+  for (const check of result.checks) {
+    if (check.category === 'machine') machines.add(check.target);
+  }
+
+  for (const host of machines) {
+    const name = getMachineName(host, config);
+    const ip = name !== host ? ` (${host})` : '';
+    const status = result.machines[host] || 'unknown';
+    const statusColor = status === 'online' ? chalk.green : chalk.red;
+    console.log(chalk.bold(`━━ Machine: ${name}${ip} `) + statusColor(`[${status}]`) + chalk.bold(' ━━━━━━━━━━━━━━━'));
+
+    const machineChecks = result.checks.filter(c => c.category === 'machine' && c.target === host);
+    for (const check of machineChecks) {
+      const icon = getStatusIcon(check.status);
+      let line = `  ${icon} ${check.name}: ${check.message}`;
+      if (check.details) line += chalk.gray(` (${check.details})`);
+      console.log(line);
+    }
+    console.log();
+  }
+
+  // Group checks by agent
+  const agentNames = new Set<string>();
+  for (const check of result.checks) {
+    if (check.category === 'agent') agentNames.add(check.target);
+  }
+
+  for (const agentName of agentNames) {
+    const agentConfig = config.agents?.[agentName];
+    const machine = agentConfig?.machine || 'localhost';
+    const machineName = getMachineName(machine, config);
+    const runtime = agentConfig?.runtime || 'docker';
+    console.log(chalk.bold(`━━ Agent: ${agentName} (${machineName}, ${runtime}) ━━━━━━━━━━━━━━━━━`));
+
+    const agentChecks = result.checks.filter(c => c.category === 'agent' && c.target === agentName);
+    for (const check of agentChecks) {
+      const icon = getStatusIcon(check.status);
+      let line = `  ${icon} ${check.name}: ${check.message}`;
+      if (check.details) line += chalk.gray(` (${check.details})`);
+      console.log(line);
+    }
+    console.log();
+  }
+
+  // Fleet checks
+  const fleetChecks = result.checks.filter(c => c.category === 'fleet');
+  if (fleetChecks.length > 0) {
+    console.log(chalk.bold('━━ Fleet ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+    for (const check of fleetChecks) {
+      const icon = getStatusIcon(check.status);
+      let line = `  ${icon} ${check.name}: ${check.message}`;
+      if (check.details) line += chalk.gray(` (${check.details})`);
+      console.log(line);
+    }
+    console.log();
+  }
+
+  // Score
+  const { score } = result;
+  const passed = score.ok;
+  const scorable = score.total - score.skip;
+  const parts: string[] = [];
+  parts.push(chalk.bold(`Score: ${passed}/${scorable} checks passed`));
+  if (score.warn > 0) parts.push(chalk.yellow(`${score.warn} warning(s)`));
+  if (score.error > 0) parts.push(chalk.red(`${score.error} error(s)`));
+  if (score.critical > 0) parts.push(chalk.red.bold(`${score.critical} critical`));
+  if (score.skip > 0) parts.push(chalk.gray(`${score.skip} skipped`));
+  console.log(parts.join(' | '));
+  console.log(chalk.gray(`Completed in ${(result.duration / 1000).toFixed(1)}s`));
+  console.log();
+}
+
+// =============================================================================
+// Command
+// =============================================================================
+
 export function createDoctorCommand(): Command {
   const command = new Command('doctor')
     .description('Validate environment and dependencies')
     .option('--json', 'Output as JSON')
-    .action(async (options: { json?: boolean }) => {
+    .option('--fleet', 'Run fleet-wide doctor checks across all machines')
+    .option('--deep', 'Run deep checks (extended diagnostics, log scanning)')
+    .action(async (options: { json?: boolean; fleet?: boolean; deep?: boolean }) => {
+      // Fleet doctor mode
+      if (options.fleet) {
+        logger.debug('Running fleet doctor');
+        const config = loadConfig();
+        const deep = options.deep || false;
+
+        try {
+          const result = await runDoctor(config, deep);
+
+          if (options.json) {
+            console.log(JSON.stringify(result, null, 2));
+            return;
+          }
+
+          formatFleetDoctor(result, config);
+
+          // Exit with error code if critical issues
+          if (result.score.critical > 0 || result.score.error > 0) {
+            process.exit(1);
+          }
+        } catch (err) {
+          console.error(chalk.red(`Fleet doctor failed: ${err}`));
+          process.exit(1);
+        }
+        return;
+      }
+
+      // Original local doctor
       logger.debug('Running environment checks');
       
       const results: CheckResult[] = [

@@ -355,80 +355,19 @@ export function startDashboardServer(port = 3200): Promise<DashboardServer> {
             return;
           }
           
-          // GET /api/doctor
-          if (url === '/api/doctor' && method === 'GET') {
+          // GET /api/doctor or /api/doctor?deep=true
+          if (url.startsWith('/api/doctor') && method === 'GET') {
             const config = loadConfig();
-            const checks: Array<{name: string; status: string; message: string; details?: string}> = [];
+            const urlObj = new URL(url, 'http://localhost');
+            const deep = urlObj.searchParams.get('deep') === 'true';
 
-            // 1. Check Docker daemon
             try {
-              const dockerResult = await executeCommand('docker info --format "{{.ServerVersion}}"', 5000);
-              if (dockerResult.ok && dockerResult.output) {
-                checks.push({ name: 'Docker', status: 'ok', message: 'Docker running', details: `v${dockerResult.output.trim()}` });
-              } else {
-                checks.push({ name: 'Docker', status: 'error', message: 'Docker not running', details: dockerResult.output });
-              }
-            } catch {
-              checks.push({ name: 'Docker', status: 'error', message: 'Docker check failed' });
+              const { runDoctor } = await import('../core/doctor.js');
+              const result = await runDoctor(config, deep);
+              jsonResponse(res, result);
+            } catch (err) {
+              jsonResponse(res, { error: 'Doctor failed', message: (err as Error).message }, 500);
             }
-
-            // 2. Check Node version
-            try {
-              const nodeResult = await executeCommand('node --version', 5000);
-              if (nodeResult.ok) {
-                checks.push({ name: 'Node.js', status: 'ok', message: nodeResult.output.trim() });
-              } else {
-                checks.push({ name: 'Node.js', status: 'error', message: 'Node.js not found' });
-              }
-            } catch {
-              checks.push({ name: 'Node.js', status: 'error', message: 'Node check failed' });
-            }
-
-            // 3. Check 1Password CLI
-            try {
-              const opResult = await executeCommand('op --version 2>/dev/null', 5000);
-              if (opResult.ok && opResult.output) {
-                checks.push({ name: '1Password CLI', status: 'ok', message: `v${opResult.output.trim()}` });
-              } else {
-                checks.push({ name: '1Password CLI', status: 'warn', message: 'Not installed' });
-              }
-            } catch {
-              checks.push({ name: '1Password CLI', status: 'warn', message: 'Not available' });
-            }
-
-            // 4. Check Tailscale
-            try {
-              const tsResult = await executeCommand('tailscale status --json 2>/dev/null | head -1', 5000);
-              if (tsResult.ok) {
-                checks.push({ name: 'Tailscale', status: 'ok', message: 'Connected' });
-              } else {
-                checks.push({ name: 'Tailscale', status: 'warn', message: 'Not connected' });
-              }
-            } catch {
-              checks.push({ name: 'Tailscale', status: 'warn', message: 'Not available' });
-            }
-
-            // 5. SSH connectivity to each machine in config
-            const machinesConfig = (config.machines || {}) as Record<string, any>;
-            for (const [ip, mc] of Object.entries(machinesConfig)) {
-              if (!mc) continue;
-              if (isLocalMachine(ip)) continue;
-              const name = mc.sshAlias || ip;
-              const target = mc.sshAlias || `${mc.user || 'hani'}@${ip}`;
-              try {
-                const sshResult = await executeCommand(`ssh -o ConnectTimeout=5 -o BatchMode=yes ${target} 'echo ok'`, 8000);
-                if (sshResult.ok) {
-                  checks.push({ name: `SSH to ${name}`, status: 'ok', message: 'Connected' });
-                } else {
-                  checks.push({ name: `SSH to ${name}`, status: 'error', message: 'Connection failed', details: sshResult.output });
-                }
-              } catch {
-                checks.push({ name: `SSH to ${name}`, status: 'error', message: 'SSH check failed' });
-              }
-            }
-
-            const okCount = checks.filter(c => c.status === 'ok').length;
-            jsonResponse(res, { checks, score: `${okCount}/${checks.length}` });
             return;
           }
 
@@ -1067,10 +1006,16 @@ function getEmbeddedHtml(): string {
 
   <!-- Doctor Modal -->
   <div class="modal-overlay" id="doctor-modal">
-    <div class="modal">
+    <div class="modal" style="max-width:850px;">
       <div class="modal-header">
         <h2>🩺 Fleet Doctor</h2>
-        <button class="modal-close" onclick="closeModal('doctor-modal')">✕</button>
+        <div style="display:flex;align-items:center;gap:0.75rem;">
+          <label style="font-size:0.8rem;color:var(--text-dim);display:flex;align-items:center;gap:4px;">
+            <input type="checkbox" id="doctor-deep-toggle"> Deep scan
+          </label>
+          <button class="btn btn-sm" onclick="runDoctor()" id="doctor-rerun-btn">Re-run</button>
+          <button class="modal-close" onclick="closeModal('doctor-modal')">✕</button>
+        </div>
       </div>
       <div class="modal-body">
         <div id="doctor-content" style="text-align:center;padding:2rem;color:var(--text-dim);">
@@ -1578,26 +1523,78 @@ async function runDoctor() {
   document.getElementById('doctor-score').style.display = 'none';
   openModal('doctor-modal');
 
+  var deep = document.getElementById('doctor-deep-toggle').checked;
+  var url = '/api/doctor' + (deep ? '?deep=true' : '');
+
   try {
-    const data = await safeFetchJson('/api/doctor');
-    const checks = data.checks || [];
-    const html = '<table style="width:100%;border-collapse:collapse;">' +
-      '<thead><tr><th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Check</th>' +
-      '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Status</th>' +
-      '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Details</th></tr></thead>' +
-      '<tbody>' + checks.map(function(c) {
-        var icon = c.status === 'ok' ? '✅' : c.status === 'warn' ? '⚠️' : '❌';
-        var color = c.status === 'ok' ? 'var(--green)' : c.status === 'warn' ? 'var(--yellow)' : 'var(--red)';
-        return '<tr>' +
-          '<td style="padding:6px 8px;border-bottom:1px solid var(--border);">' + esc(c.name) + '</td>' +
-          '<td style="padding:6px 8px;border-bottom:1px solid var(--border);color:' + color + ';">' + icon + ' ' + esc(c.status) + '</td>' +
-          '<td style="padding:6px 8px;border-bottom:1px solid var(--border);color:var(--text-dim);font-size:0.8rem;">' + esc(c.message || '') + (c.details ? ' (' + esc(c.details) + ')' : '') + '</td>' +
-        '</tr>';
-      }).join('') + '</tbody></table>';
-    document.getElementById('doctor-content').innerHTML = html;
+    var data = await safeFetchJson(url);
+    var checks = data.checks || [];
+
+    // Status icon map
+    function statusIcon(s) {
+      if (s === 'ok') return '✅';
+      if (s === 'warn') return '⚠️';
+      if (s === 'critical') return '🔴';
+      if (s === 'skip') return '⊘';
+      return '❌';
+    }
+    function statusColor(s) {
+      if (s === 'ok') return 'var(--green)';
+      if (s === 'warn') return 'var(--yellow)';
+      if (s === 'skip') return 'var(--text-dim)';
+      return 'var(--red)';
+    }
+
+    // Group checks by category + target
+    var groups = {};
+    checks.forEach(function(c) {
+      var key = c.category + '|' + c.target;
+      if (!groups[key]) groups[key] = { category: c.category, target: c.target, checks: [] };
+      groups[key].checks.push(c);
+    });
+
+    var html = '';
+
+    // Render each group
+    Object.values(groups).forEach(function(g) {
+      var label = '';
+      if (g.category === 'machine') {
+        var mStatus = (data.machines && data.machines[g.target]) || 'unknown';
+        var mColor = mStatus === 'online' ? 'var(--green)' : 'var(--red)';
+        label = '🖥️ Machine: ' + esc(g.target) + ' <span style="color:' + mColor + ';font-size:0.75rem;">[' + mStatus + ']</span>';
+      } else if (g.category === 'agent') {
+        label = '🤖 Agent: ' + esc(g.target);
+      } else {
+        label = '🌐 Fleet';
+      }
+
+      html += '<div style="margin-bottom:1rem;"><div style="font-weight:600;font-size:0.9rem;margin-bottom:0.4rem;border-bottom:1px solid var(--border);padding-bottom:0.3rem;">' + label + '</div>';
+      html += '<table style="width:100%;border-collapse:collapse;">';
+      g.checks.forEach(function(c) {
+        html += '<tr>' +
+          '<td style="padding:3px 8px;width:40%;font-size:0.8rem;">' + esc(c.name) + '</td>' +
+          '<td style="padding:3px 8px;width:10%;color:' + statusColor(c.status) + ';font-size:0.8rem;">' + statusIcon(c.status) + '</td>' +
+          '<td style="padding:3px 8px;color:var(--text-dim);font-size:0.8rem;">' + esc(c.message || '');
+        if (c.details) html += ' <span style="opacity:0.7;">(' + esc(c.details) + ')</span>';
+        if (c.fix) html += ' <span style="color:var(--blue);font-size:0.7rem;" title="' + esc(c.fix) + '">💡 Fix</span>';
+        html += '</td></tr>';
+      });
+      html += '</table></div>';
+    });
+
+    document.getElementById('doctor-content').innerHTML = html || '<div style="text-align:center;color:var(--text-dim);">No checks returned</div>';
+
+    // Score
+    var s = data.score || {};
+    var scorable = (s.total || 0) - (s.skip || 0);
+    var scoreText = (s.ok || 0) + '/' + scorable + ' passed';
+    var parts = [scoreText];
+    if (s.warn) parts.push(s.warn + ' warning(s)');
+    if (s.error) parts.push(s.error + ' error(s)');
+    if (s.critical) parts.push(s.critical + ' critical');
     var scoreEl = document.getElementById('doctor-score');
-    scoreEl.textContent = 'Score: ' + (data.score || '?');
-    scoreEl.style.color = checks.every(function(c) { return c.status === 'ok'; }) ? 'var(--green)' : 'var(--yellow)';
+    scoreEl.innerHTML = parts.join(' | ') + '<br><span style="font-size:0.8rem;color:var(--text-dim);font-weight:400;">' + data.mode + ' mode · ' + ((data.duration || 0) / 1000).toFixed(1) + 's</span>';
+    scoreEl.style.color = (s.error || s.critical) ? 'var(--red)' : s.warn ? 'var(--yellow)' : 'var(--green)';
     scoreEl.style.display = 'block';
   } catch (err) {
     document.getElementById('doctor-content').innerHTML = '<div style="color:var(--red);text-align:center;">❌ Doctor failed: ' + esc(err.message) + '</div>';
