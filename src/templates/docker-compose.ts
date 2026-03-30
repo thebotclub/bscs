@@ -5,7 +5,7 @@
 export interface ComposeServiceOptions {
   name: string;
   image: string;
-  ports: { gateway: number; remote: number };
+  ports: { gateway?: number; remote?: number };
   memory?: string;
   pidsLimit?: number;
   env?: Record<string, string>;

@@ -51,8 +51,8 @@ export interface CreateContainerOptions {
   name: string;
   image: string;
   ports?: {
-    gateway: number;
-    remote: number;
+    gateway?: number;
+    remote?: number;
   };
   env?: Record<string, string>;
   volumes?: Record<string, string>;

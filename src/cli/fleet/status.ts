@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
+import { execSync } from 'child_process';
 import { loadConfig } from '../../core/config.js';
 import { listBscsContainers, type ContainerInfo } from '../../core/docker.js';
 import { createLogger } from '../../util/logger.js';
@@ -13,6 +14,8 @@ export interface FleetAgentStatus {
   status: string;
   containerId?: string;
   image?: string;
+  role?: string;
+  runtime?: string;
   ports?: { gateway?: number; remote?: number };
   created?: string;
 }
@@ -20,58 +23,192 @@ export interface FleetAgentStatus {
 export interface FleetStatusResult {
   fleetName: string;
   controller: string;
-  machines: Record<string, { host: string; agentCount: number; status: string }>;
+  machines: Record<string, { host: string; agentCount: number; status: string; role?: string }>;
   agents: FleetAgentStatus[];
   summary: { total: number; running: number; stopped: number; unknown: number };
+}
+
+interface RemoteContainerInfo {
+  name: string;
+  status: string;
+  image: string;
+}
+
+function getLocalIps(): string[] {
+  try {
+    const result = execSync("/sbin/ifconfig 2>/dev/null | grep 'inet ' | awk '{print $2}' || ip -4 addr show 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1", { encoding: 'utf8', timeout: 3000 });
+    return result.trim().split('\n').filter(Boolean);
+  } catch {
+    return ['127.0.0.1'];
+  }
+}
+
+function isLocalMachine(host: string): boolean {
+  const localIps = getLocalIps();
+  return host === 'localhost' || host === '127.0.0.1' || localIps.includes(host);
+}
+
+async function getRemoteDockerContainers(host: string, user: string, sshAlias?: string): Promise<RemoteContainerInfo[]> {
+  try {
+    const target = sshAlias || `${user}@${host}`;
+    const cmd = `ssh -o ConnectTimeout=5 -o BatchMode=yes ${target} 'export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"; docker ps -a --format "{{.Names}}|{{.Status}}|{{.Image}}" 2>/dev/null'`;
+    const result = execSync(cmd, { encoding: 'utf8', timeout: 10000 });
+    return result.trim().split('\n').filter(Boolean).map(line => {
+      const [name, rawStatus, image] = line.split('|');
+      const status = rawStatus?.toLowerCase().startsWith('up') ? 'running' :
+                     rawStatus?.toLowerCase().startsWith('exited') ? 'stopped' :
+                     rawStatus?.toLowerCase().startsWith('created') ? 'created' : 'unknown';
+      return { name: name || '', status, image: image || '' };
+    });
+  } catch (err) {
+    logger.debug({ host, err: (err as Error).message }, 'Failed to get remote containers');
+    return [];
+  }
+}
+
+async function checkRemoteNativeAgent(host: string, user: string, port: number, sshAlias?: string): Promise<boolean> {
+  try {
+    const target = sshAlias || `${user}@${host}`;
+    const cmd = `ssh -o ConnectTimeout=5 -o BatchMode=yes ${target} 'curl -s --max-time 3 http://127.0.0.1:${port}/healthz 2>/dev/null'`;
+    const result = execSync(cmd, { encoding: 'utf8', timeout: 10000 });
+    return result.includes('"ok"') || result.includes('"live"');
+  } catch {
+    return false;
+  }
 }
 
 export async function getFleetStatus(includeAll = true): Promise<FleetStatusResult> {
   const config = loadConfig();
   
-  let containers: ContainerInfo[] = [];
+  // Get local Docker containers
+  let localContainers: ContainerInfo[] = [];
   try {
-    containers = await listBscsContainers();
+    localContainers = await listBscsContainers();
   } catch (err) {
-    logger.warn({ err }, 'Could not list Docker containers');
+    logger.warn({ err }, 'Could not list local Docker containers');
   }
+  const localContainerMap = new Map(localContainers.map(c => [c.name.replace('openclaw_', ''), c]));
   
-  const containerMap = new Map(containers.map(c => [c.name.replace('openclaw_', ''), c]));
-  const agents: FleetAgentStatus[] = [];
-  
-  // Process configured agents
+  // Group agents by machine
+  const machineAgents = new Map<string, Array<{ name: string; agentConfig: any }>>();
   if (config.agents) {
-    for (const name of Object.keys(config.agents)) {
-      const agentConfig = config.agents[name];
+    for (const [name, agentConfig] of Object.entries(config.agents)) {
       if (!agentConfig) continue;
-      
-      const container = containerMap.get(name);
-      if (container) {
-        agents.push({
-          name,
-          machine: 'localhost',
-          status: container.status,
-          containerId: container.id,
-          image: container.image,
-          ports: container.ports || agentConfig.ports,
-          created: agentConfig.created,
-        });
-        containerMap.delete(name);
-      } else {
-        agents.push({
-          name,
-          machine: 'localhost',
-          status: 'missing',
-          image: agentConfig.image,
-          ports: agentConfig.ports,
-          created: agentConfig.created,
-        });
-      }
+      const machine = agentConfig.machine || 'localhost';
+      if (!machineAgents.has(machine)) machineAgents.set(machine, []);
+      machineAgents.get(machine)!.push({ name, agentConfig });
     }
   }
   
-  // Add orphaned containers
+  // Fetch remote container status (parallel SSH)
+  const remoteContainerCache = new Map<string, RemoteContainerInfo[]>();
+  const machineStatus = new Map<string, string>();
+  
+  const remoteMachines = [...machineAgents.keys()].filter(m => !isLocalMachine(m));
+  const remoteChecks = remoteMachines.map(async (machineHost) => {
+    const machineConfig = (config.machines as any)?.[machineHost] || {};
+    const user = machineConfig.user || 'hani';
+    const sshAlias = machineConfig.sshAlias;
+    try {
+      const containers = await getRemoteDockerContainers(machineHost, user, sshAlias);
+      remoteContainerCache.set(machineHost, containers);
+      machineStatus.set(machineHost, 'online');
+    } catch {
+      machineStatus.set(machineHost, 'offline');
+    }
+  });
+  
+  await Promise.all(remoteChecks);
+  
+  const agents: FleetAgentStatus[] = [];
+  
+  // Process all configured agents
+  if (config.agents) {
+    for (const [name, agentConfig] of Object.entries(config.agents)) {
+      if (!agentConfig) continue;
+      const machine = agentConfig.machine || 'localhost';
+      const isLocal = isLocalMachine(machine);
+      const runtime = agentConfig.runtime || 'docker';
+      const containerName = agentConfig.container || `openclaw_${name}`;
+      
+      let status = 'unknown';
+      let containerId: string | undefined;
+      let image: string | undefined;
+      let ports: { gateway?: number; remote?: number } | undefined;
+      
+      if (runtime === 'docker') {
+        if (isLocal) {
+          // Check local Docker
+          const container = localContainerMap.get(name) || 
+            localContainers.find(c => c.name === containerName);
+          if (container) {
+            status = container.status;
+            containerId = container.id;
+            image = container.image;
+            ports = container.ports || { gateway: agentConfig.ports?.gateway, remote: agentConfig.ports?.remote };
+            localContainerMap.delete(name);
+          } else {
+            status = 'missing';
+          }
+        } else {
+          // Check remote Docker
+          const remoteContainers = remoteContainerCache.get(machine) || [];
+          const match = remoteContainers.find(c => 
+            c.name === containerName || c.name === `openclaw_${name}` || c.name === name
+          );
+          if (match) {
+            status = match.status;
+            image = match.image;
+          } else if (machineStatus.get(machine) === 'online') {
+            status = 'missing';
+          } else {
+            status = 'unreachable';
+          }
+          ports = { gateway: agentConfig.ports?.gateway, remote: agentConfig.ports?.remote };
+        }
+      } else if (runtime === 'native') {
+        // For native agents, check gateway health
+        const gwPort = agentConfig.ports?.gateway || 18789;
+        if (isLocal) {
+          try {
+            const res = execSync(`curl -s --max-time 2 http://127.0.0.1:${gwPort}/healthz`, { encoding: 'utf8', timeout: 5000 });
+            status = (res.includes('"ok"') || res.includes('"live"')) ? 'running' : 'stopped';
+          } catch {
+            status = 'stopped';
+          }
+        } else {
+          const nativeMachineConfig = (config.machines as any)?.[machine] || {};
+          const nativeUser = nativeMachineConfig.user || 'hani';
+          const nativeSshAlias = nativeMachineConfig.sshAlias;
+          const healthy = await checkRemoteNativeAgent(machine, nativeUser, gwPort, nativeSshAlias);
+          if (healthy) {
+            status = 'running';
+          } else if (machineStatus.get(machine) === 'online') {
+            status = 'stopped';
+          } else {
+            status = 'unreachable';
+          }
+        }
+        ports = { gateway: agentConfig.ports?.gateway };
+      }
+      
+      agents.push({
+        name,
+        machine,
+        status,
+        containerId,
+        image: image || agentConfig.image,
+        role: agentConfig.role,
+        runtime,
+        ports: ports || { gateway: agentConfig.ports?.gateway, remote: agentConfig.ports?.remote },
+        created: agentConfig.created,
+      });
+    }
+  }
+  
+  // Add orphaned local containers
   if (includeAll) {
-    for (const [name, container] of containerMap) {
+    for (const [name, container] of localContainerMap) {
       agents.push({
         name,
         machine: 'localhost',
@@ -88,14 +225,31 @@ export async function getFleetStatus(includeAll = true): Promise<FleetStatusResu
   const summary = {
     total: agents.length,
     running: agents.filter(a => a.status === 'running').length,
-    stopped: agents.filter(a => a.status === 'stopped').length,
-    unknown: agents.filter(a => a.status !== 'running' && a.status !== 'stopped').length,
+    stopped: agents.filter(a => a.status === 'stopped' || a.status === 'created').length,
+    unknown: agents.filter(a => !['running', 'stopped', 'created'].includes(a.status)).length,
   };
+  
+  // Build machines summary
+  const machinesResult: Record<string, { host: string; agentCount: number; status: string; role?: string }> = {};
+  for (const [host, machineConfig] of Object.entries(config.machines || {})) {
+    const agentCount = agents.filter(a => a.machine === host).length;
+    machinesResult[host] = {
+      host,
+      agentCount,
+      status: isLocalMachine(host) ? 'online' : (machineStatus.get(host) || 'unknown'),
+      role: machineConfig.role,
+    };
+  }
+  // Add localhost if not in machines
+  const localAgentCount = agents.filter(a => isLocalMachine(a.machine)).length;
+  if (localAgentCount > 0 && !Object.values(machinesResult).some(m => isLocalMachine(m.host))) {
+    machinesResult['localhost'] = { host: 'localhost', agentCount: localAgentCount, status: 'online' };
+  }
   
   return {
     fleetName: config.fleet?.name || 'unnamed-fleet',
     controller: config.fleet?.controller || 'localhost',
-    machines: { localhost: { host: 'localhost', agentCount: agents.length, status: 'online' } },
+    machines: machinesResult,
     agents,
     summary,
   };

@@ -8,7 +8,7 @@ export interface AgentConfigTemplate {
   role: AgentRole;
   model: string;
   image: string;
-  ports: { gateway: number; remote: number };
+  ports: { gateway?: number; remote?: number };
 }
 
 const ROLE_DESCRIPTIONS: Record<string, string> = {

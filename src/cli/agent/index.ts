@@ -20,7 +20,7 @@ import type { AgentRole } from '../../util/types.js';
 const logger = createLogger('agent');
 
 // Allocate ports for a new agent
-async function allocatePorts(config: BscsConfig): Promise<{ gateway: number; remote: number }> {
+async function allocatePorts(config: BscsConfig): Promise<{ gateway?: number; remote?: number }> {
   const start = config.defaults?.portRange?.start || 19000;
   const end = config.defaults?.portRange?.end || 19999;
   const usedPorts = new Set<number>();
@@ -29,8 +29,8 @@ async function allocatePorts(config: BscsConfig): Promise<{ gateway: number; rem
   if (config.agents) {
     for (const agent of Object.values(config.agents)) {
       if (agent.ports) {
-        usedPorts.add(agent.ports.gateway);
-        usedPorts.add(agent.ports.remote);
+        if (agent.ports.gateway) usedPorts.add(agent.ports.gateway);
+        if (agent.ports.remote) usedPorts.add(agent.ports.remote);
       }
     }
   }
@@ -269,6 +269,7 @@ export function createAgentCreateCommand(): Command {
           machine: 'localhost',
           image,
           model: agentModel,
+          runtime: 'docker' as const,
           ports,
           created: new Date().toISOString(),
           status: 'created',
@@ -278,7 +279,7 @@ export function createAgentCreateCommand(): Command {
         // Start if requested
         if (!noStart) {
           await startContainer(name);
-          config.agents[name].status = 'running';
+          config.agents[name]!.status = 'running';
           saveConfig(config);
         }
         

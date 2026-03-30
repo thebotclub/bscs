@@ -209,7 +209,7 @@ export function createFleetImportCommand(): Command {
       const configContent = readFileSync(foundConfig, 'utf-8');
       
       // Simple parsing for common fleet.sh patterns
-      const agents: Record<string, { name: string; image?: string; ports?: { gateway: number; remote: number } }> = {};
+      const agents: Record<string, { name: string; image?: string; ports?: { gateway?: number; remote?: number } }> = {};
       
       // Look for AGENTS=("agent1" "agent2") pattern
       const agentsMatch = configContent.match(/AGENTS=\(([^)]+)\)/);

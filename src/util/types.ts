@@ -11,6 +11,7 @@ export const MachineSchema = z.object({
   user: z.string().default('hani'),
   role: MachineRoleSchema,
   port: z.number().default(22),
+  sshAlias: z.string().optional(),
 });
 
 export type MachineRole = z.infer<typeof MachineRoleSchema>;
@@ -121,10 +122,13 @@ export const AgentConfigSchema = z.object({
   machine: z.string().default('localhost'),
   image: z.string().optional(),
   model: z.string().optional(),
+  runtime: z.enum(['docker', 'native']).default('docker'),
+  container: z.string().optional(),
+  configPath: z.string().optional(),
   ports: z
     .object({
-      gateway: z.number(),
-      remote: z.number(),
+      gateway: z.number().optional(),
+      remote: z.number().optional(),
     })
     .optional(),
   created: z.string().optional(),

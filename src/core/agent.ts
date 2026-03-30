@@ -20,7 +20,7 @@ import type { AgentRole } from '../util/types.js';
 
 // ── Port Allocation ──────────────────────────────────────────────────
 
-export async function allocatePorts(config: BscsConfig): Promise<{ gateway: number; remote: number }> {
+export async function allocatePorts(config: BscsConfig): Promise<{ gateway?: number; remote?: number }> {
   const start = config.defaults?.portRange?.start || 19000;
   const end = config.defaults?.portRange?.end || 19999;
   const usedPorts = new Set<number>();
@@ -28,8 +28,8 @@ export async function allocatePorts(config: BscsConfig): Promise<{ gateway: numb
   if (config.agents) {
     for (const agent of Object.values(config.agents)) {
       if (agent.ports) {
-        usedPorts.add(agent.ports.gateway);
-        usedPorts.add(agent.ports.remote);
+        if (agent.ports.gateway) usedPorts.add(agent.ports.gateway);
+        if (agent.ports.remote) usedPorts.add(agent.ports.remote);
       }
     }
   }
@@ -175,7 +175,7 @@ export interface CreateAgentResult {
   image: string;
   role: AgentRole;
   model: string;
-  ports: { gateway: number; remote: number };
+  ports: { gateway?: number; remote?: number };
   status: string;
   tribunal: boolean;
   dryRun: boolean;
@@ -232,6 +232,7 @@ export async function createAgent(options: CreateAgentOptions): Promise<CreateAg
     image,
     model: agentModel,
     ports,
+    runtime: 'docker' as const,
     created: new Date().toISOString(),
     status: 'created',
   };
@@ -347,7 +348,7 @@ export interface AgentStatusResult {
   status: string;
   role: string;
   model?: string;
-  ports?: { gateway: number; remote: number };
+  ports?: { gateway?: number; remote?: number };
   created?: string;
   containerId?: string;
 }
@@ -367,7 +368,7 @@ export async function getAgentStatus(name: string): Promise<AgentStatusResult> {
     status: container?.status || 'unknown',
     role: agentConfig.role,
     model: agentConfig.model,
-    ports: (container?.ports as { gateway: number; remote: number } | undefined) || agentConfig.ports,
+    ports: (container?.ports as { gateway?: number; remote?: number } | undefined) || agentConfig.ports,
     created: agentConfig.created,
     containerId: container?.id,
   };
@@ -391,7 +392,7 @@ export async function getAllAgentStatuses(): Promise<AgentStatusResult[]> {
       status: container?.status || 'unknown',
       role: agentConfig.role,
       model: agentConfig.model,
-      ports: (container?.ports as { gateway: number; remote: number } | undefined) || agentConfig.ports,
+      ports: (container?.ports as { gateway?: number; remote?: number } | undefined) || agentConfig.ports,
       created: agentConfig.created,
     };
   });

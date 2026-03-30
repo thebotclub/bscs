@@ -262,6 +262,8 @@ function getEmbeddedHtml(): string {
     .status-dot.stopped { background: #f85149; }
     .status-dot.created { background: #d29922; }
     .status-dot.unknown, .status-dot.missing { background: #6e7681; }
+    .status-dot.unreachable { background: #d29922; }
+    .status-dot.orphaned-running { background: #58a6ff; }
     .loading { text-align: center; padding: 4rem; color: #8b949e; }
     .error { color: #f85149; text-align: center; padding: 2rem; }
     .refresh-btn {
@@ -337,12 +339,14 @@ function getEmbeddedHtml(): string {
         return;
       }
       
-      const html = '<table><thead><tr><th>Name</th><th>Status</th><th>Machine</th><th>Ports</th></tr></thead><tbody>' +
+      const html = '<table><thead><tr><th>Name</th><th>Status</th><th>Role</th><th>Runtime</th><th>Machine</th><th>Ports</th></tr></thead><tbody>' +
         data.agents.map(a => '<tr>' +
           '<td>' + a.name + '</td>' +
-          '<td><span class="status-dot ' + a.status + '"></span>' + a.status + '</td>' +
-          '<td>' + a.machine + '</td>' +
-          '<td>' + (a.ports ? a.ports.gateway + '/' + a.ports.remote : '-') + '</td>' +
+          '<td><span class="status-dot ' + (a.status || 'unknown') + '"></span>' + (a.status || '?') + '</td>' +
+          '<td>' + (a.role || '-') + '</td>' +
+          '<td>' + (a.runtime || 'docker') + '</td>' +
+          '<td>' + (a.machine || '-') + '</td>' +
+          '<td>' + (a.ports ? (a.ports.gateway || '-') + '/' + (a.ports.remote || '-') : '-') + '</td>' +
         '</tr>').join('') +
         '</tbody></table>';
       

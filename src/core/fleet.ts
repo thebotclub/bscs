@@ -263,7 +263,7 @@ export interface ImportResult {
   configPath: string;
   fleetName: string;
   image: string;
-  agents: Record<string, { name: string; ports?: { gateway: number; remote: number } }>;
+  agents: Record<string, { name: string; ports?: { gateway?: number; remote?: number } }>;
 }
 
 export function importFleetSh(fleetShPath: string): ImportResult {
@@ -292,7 +292,7 @@ export function importFleetSh(fleetShPath: string): ImportResult {
   const configContent = readFileSync(foundConfig, 'utf-8');
   const agents: Record<
     string,
-    { name: string; ports?: { gateway: number; remote: number } }
+    { name: string; ports?: { gateway?: number; remote?: number } }
   > = {};
 
   const agentsMatch = configContent.match(/AGENTS=\(([^)]+)\)/);
