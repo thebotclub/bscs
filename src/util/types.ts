@@ -6,10 +6,6 @@ import { z } from 'zod';
 
 export const MachineRoleSchema = z.enum(['controller', 'worker', 'gpu']);
 
-
- profile: MachineProfileSchema,
-})
-
 export type MachineRole = z.infer<typeof MachineRoleSchema>;
 export type Machine = z.infer<typeof MachineSchema>;
 
