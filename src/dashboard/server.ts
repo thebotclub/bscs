@@ -1095,10 +1095,14 @@ function getEmbeddedHtml(): string {
 <script>
 // ===================== Safe Fetch Helper =====================
 async function safeFetchJson(url, options, retries = 2) {
+  // Doctor endpoint can take longer due to SSH checks
+  const isDoctor = url.includes('/api/doctor');
+  const timeoutMs = isDoctor ? 30000 : 15000;
+  
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
       const res = await fetch(url, { ...options, signal: controller.signal });
       clearTimeout(timeout);
       const text = await res.text();
@@ -1110,7 +1114,10 @@ async function safeFetchJson(url, options, retries = 2) {
       if (!res.ok && !data.ok && !data.message) throw new Error('HTTP ' + res.status);
       return data;
     } catch (err) {
-      if (attempt < retries && (err.name === 'AbortError' || err.message.includes('Empty') || err.message.includes('JSON'))) {
+      if (err.name === 'AbortError') {
+        throw new Error('Request timed out after ' + (timeoutMs/1000) + 's');
+      }
+      if (attempt < retries && (err.message.includes('Empty') || err.message.includes('JSON'))) {
         await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
         continue;
       }
