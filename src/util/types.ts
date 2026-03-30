@@ -6,6 +6,14 @@ import { z } from 'zod';
 
 export const MachineRoleSchema = z.enum(['controller', 'worker', 'gpu']);
 
+export const MachineSchema = z.object({
+  host: z.string(),
+  user: z.string().default('hani'),
+  role: MachineRoleSchema,
+  port: z.number().default(22),
+  sshAlias: z.string().optional(),
+});
+
 export type MachineRole = z.infer<typeof MachineRoleSchema>;
 export type Machine = z.infer<typeof MachineSchema>;
 
