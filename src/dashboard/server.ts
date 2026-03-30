@@ -11,6 +11,7 @@ import { loadConfig, saveConfig, type BscsConfig } from '../core/config.js';
 import { Command } from 'commander';
 import { createHash } from 'crypto';
 
+
 const logger = createLogger('dashboard');
 
 // WebSocket clients
@@ -79,21 +80,25 @@ async function executeAgentCommand(agentName: string, command: string, config: B
   }
 }
 
-const DOCKER_PATH_PREFIX = 'export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH" && ';
-
 function getDockerCommand(action: string, containerName: string): string {
-  const prefix = DOCKER_PATH_PREFIX;
+  const prefix = 'export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH" && ';
   switch (action) {
-    case 'start': return `${prefix}docker start ${containerName}`;
-    case 'stop': return `${prefix}docker stop ${containerName}`;
-    case 'restart': return `${prefix}docker restart ${containerName}`;
-    case 'remove': return `${prefix}docker rm -f ${containerName}`;
-    case 'logs': return `${prefix}docker logs --tail 100 ${containerName}`;
-    default: throw new Error(`Unknown action: ${action}`);
+    case 'start':
+      return `${prefix}docker start ${containerName}`;
+    case 'stop':
+      return `${prefix}docker stop ${containerName}`;
+    case 'restart':
+      return `${prefix}docker restart ${containerName}`;
+    case 'remove':
+      return `${prefix}docker rm -f ${containerName}`;
+    case 'logs':
+      return `${prefix}docker logs --tail 100 ${containerName}`;
+    default:
+      throw new Error(`Unknown action: ${action}`);
   }
 }
 
-function getNativeCommand(action: string, agentName: string, _gatewayPort?: number): string {
+function getNativeCommand(action: string, agentName: string): string {
   switch (action) {
     case 'start':
       return `launchctl kickstart gui/$(id -u)/ai.openclaw.${agentName} 2>/dev/null || echo "Started"`;
@@ -103,7 +108,8 @@ function getNativeCommand(action: string, agentName: string, _gatewayPort?: numb
       return `pkill -f "openclaw.*gateway.*${agentName}" 2>/dev/null; pkill -f "openclaw.*${agentName}" 2>/dev/null; sleep 2; launchctl kickstart -k gui/$(id -u)/ai.openclaw.${agentName} 2>/dev/null || echo "Restarted"`;
     case 'logs':
       return `tail -100 ~/Library/Logs/openclaw/${agentName}.log 2>/dev/null || journalctl --user -u openclaw-${agentName} -n 100 --no-pager 2>/dev/null || echo "No logs found"`;
-    default: throw new Error(`Unknown action: ${action}`);
+    default:
+      throw new Error(`Unknown action: ${action}`);
   }
 }
 
@@ -136,7 +142,7 @@ async function handleAgentAction(agentName: string, action: string, config: Bscs
     const cmd = getDockerCommand(action, containerName);
     return executeAgentCommand(agentName, cmd, config);
   } else if (runtime === 'native') {
-    const cmd = getNativeCommand(action, agentName, agent.ports?.gateway);
+    const cmd = getNativeCommand(action, agentName);
     return executeAgentCommand(agentName, cmd, config);
   }
 
