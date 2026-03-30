@@ -315,11 +315,13 @@ function getEmbeddedHtml(): string {
     async function fetchData() {
       try {
         const res = await fetch('/api/fleet');
-        const data = await res.json();
+        const text = await res.text();
+        if (!text) throw new Error('Empty response');
+        const data = JSON.parse(text);
         updateUI(data);
       } catch (err) {
         document.getElementById('agents-table').innerHTML = 
-          '<div class="error">Failed to load data: ' + err.message + '</div>';
+          '<div class="error">Failed to load data: ' + err.message + '. <button class="refresh-btn" onclick="fetchData()">Retry</button></div>';
       }
     }
     
@@ -347,45 +349,64 @@ function getEmbeddedHtml(): string {
       document.getElementById('agents-table').innerHTML = html;
     }
     
+    let wsRetries = 0;
+    const MAX_WS_RETRIES = 3;
+    let pollInterval = null;
+    
     function connectWebSocket() {
-      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      ws = new WebSocket(protocol + '//' + location.host + '/ws');
+      if (wsRetries >= MAX_WS_RETRIES) {
+        console.log('WebSocket failed after ' + MAX_WS_RETRIES + ' attempts, using polling');
+        startPolling();
+        return;
+      }
       
-      ws.onopen = () => {
-        document.getElementById('connection-status').textContent = '● Connected';
-        document.getElementById('connection-status').style.color = '#7ee787';
-      };
-      
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          if (msg.type === 'fleet-update') {
-            updateUI(msg.data);
-          }
-        } catch (e) {}
-      };
-      
-      ws.onclose = () => {
-        document.getElementById('connection-status').textContent = '○ Disconnected';
-        document.getElementById('connection-status').style.color = '#f85149';
-        setTimeout(connectWebSocket, 3000);
-      };
+      try {
+        const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        ws = new WebSocket(protocol + '//' + location.host + '/ws');
+        
+        ws.onopen = () => {
+          wsRetries = 0;
+          if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+          document.getElementById('connection-status').textContent = '● Live';
+          document.getElementById('connection-status').style.color = '#7ee787';
+        };
+        
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'fleet-update') updateUI(msg.data);
+          } catch (e) {}
+        };
+        
+        ws.onclose = () => {
+          wsRetries++;
+          document.getElementById('connection-status').textContent = '↻ Polling';
+          document.getElementById('connection-status').style.color = '#d29922';
+          setTimeout(connectWebSocket, 5000);
+        };
+        
+        ws.onerror = () => {
+          wsRetries++;
+          ws.close();
+        };
+      } catch (e) {
+        startPolling();
+      }
     }
     
-    function refreshData() {
-      fetchData();
+    function startPolling() {
+      document.getElementById('connection-status').textContent = '↻ Polling';
+      document.getElementById('connection-status').style.color = '#d29922';
+      if (!pollInterval) pollInterval = setInterval(fetchData, 10000);
     }
+    
+    function refreshData() { fetchData(); }
     
     // Initial load
     fetchData();
     
-    // WebSocket for real-time updates
-    try {
-      connectWebSocket();
-    } catch (e) {
-      console.log('WebSocket not available, using polling');
-      setInterval(fetchData, 30000);
-    }
+    // Try WebSocket, fall back to polling
+    connectWebSocket();
   </script>
 </body>
 </html>`;
