@@ -351,25 +351,36 @@ async function checkAgentGateway(agentName: string, agentConfig: any, config: Bs
     return { category: 'agent', target: agentName, name: 'Gateway', status: 'skip', message: 'No gateway port configured' };
   }
 
-  const cmd = remoteOrLocal(machine,
-    `curl -s --max-time 3 http://127.0.0.1:${gwPort}/healthz 2>/dev/null`,
-    config);
+  const runtime = agentConfig.runtime || 'docker';
+  const containerName = agentConfig.container || `openclaw_${agentName}`;
+  const pathPrefix = 'export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"; ';
+
+  let cmd: string;
+  if (runtime === 'docker') {
+    // For Docker agents, check healthz INSIDE the container on internal port 18789
+    // The mapped host port is typically the remote dashboard, not the gateway healthz
+    const dockerExec = `${pathPrefix}docker exec ${containerName} wget -q -O- http://127.0.0.1:18789/healthz 2>/dev/null || ${pathPrefix}docker exec ${containerName} curl -s --max-time 3 http://127.0.0.1:18789/healthz 2>/dev/null`;
+    cmd = remoteOrLocal(machine, dockerExec, config);
+  } else {
+    // For native agents, curl directly on the gateway port
+    cmd = remoteOrLocal(machine,
+      `curl -s --max-time 3 http://127.0.0.1:${gwPort}/healthz 2>/dev/null`,
+      config);
+  }
+
   const result = await executeCommand(cmd);
   if (result.ok && (result.output.includes('"ok"') || result.output.includes('"live"') || result.output.includes('status'))) {
     return { category: 'agent', target: agentName, name: 'Gateway', status: 'ok', message: 'Responding' };
   }
-  const runtime = agentConfig.runtime || 'docker';
-  const containerName = agentConfig.container || `openclaw_${agentName}`;
   const ft = getFixTarget(machine, config);
-  const pathPrefix = 'export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"; ';
   if (runtime === 'docker') {
     return { category: 'agent', target: agentName, name: 'Gateway', status: 'error', message: 'Not responding',
-      details: result.output || 'No response',
+      details: (result.output || 'No response').substring(0, 200),
       fix: `Restart container ${containerName}`, fixCommand: `${pathPrefix}docker restart ${containerName}`,
       autoFixable: true, fixTarget: ft };
   }
   return { category: 'agent', target: agentName, name: 'Gateway', status: 'error', message: 'Not responding',
-    details: result.output || 'No response',
+    details: (result.output || 'No response').substring(0, 200),
     fix: 'Restart the native agent process', autoFixable: false, fixTarget: ft };
 }
 

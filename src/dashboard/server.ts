@@ -424,6 +424,12 @@ export function startDashboardServer(port = 3200): Promise<DashboardServer> {
                 enrichedMachines[ip] = { status, name: getMachineName(ip, config) };
               }
               (result as any).machines = enrichedMachines;
+              // Truncate verbose details (e.g. full HTML from gateway checks) to keep response small
+              for (const check of result.checks) {
+                if (check.details && check.details.length > 200) {
+                  check.details = check.details.substring(0, 200) + '…';
+                }
+              }
               jsonResponse(res, result);
             } catch (err) {
               jsonResponse(res, { error: 'Doctor failed', message: (err as Error).message }, 500);
