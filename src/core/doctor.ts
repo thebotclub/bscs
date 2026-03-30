@@ -12,8 +12,10 @@ export interface DoctorCheck {
   status: 'ok' | 'warn' | 'error' | 'critical' | 'skip';
   message: string;
   details?: string;
-  fix?: string;
-  autoFixable?: boolean;
+  fix?: string;           // Human-readable fix description
+  fixCommand?: string;    // Actual command to run
+  autoFixable?: boolean;  // Safe to auto-fix?
+  fixTarget?: string;     // 'local' | sshAlias for remote
 }
 
 export interface DoctorResult {
@@ -97,6 +99,39 @@ function detectOS(host: string, config: BscsConfig): 'macos' | 'linux' {
 }
 
 // =============================================================================
+// Fix Doctor Issues
+// =============================================================================
+
+function getFixTarget(host: string, config: BscsConfig): string {
+  if (isLocalMachine(host)) return 'local';
+  const machine = (config.machines as any)?.[host];
+  return machine?.sshAlias || host;
+}
+
+export async function fixDoctorIssue(check: DoctorCheck, _config: BscsConfig): Promise<{ ok: boolean; message: string }> {
+  if (!check.fixCommand) {
+    return { ok: false, message: 'No fix command available for this check' };
+  }
+
+  const target = check.fixTarget || 'local';
+  let cmd: string;
+
+  if (target === 'local') {
+    cmd = check.fixCommand;
+  } else {
+    // target is sshAlias or host — run via SSH
+    const escaped = check.fixCommand.replace(/'/g, "'\\''");
+    cmd = `ssh -o ConnectTimeout=10 -o BatchMode=yes ${target} '${escaped}'`;
+  }
+
+  const result = await executeCommand(cmd, 30000);
+  if (result.ok) {
+    return { ok: true, message: result.output || 'Fix applied successfully' };
+  }
+  return { ok: false, message: result.output || 'Fix command failed' };
+}
+
+// =============================================================================
 // Machine Checks
 // =============================================================================
 
@@ -111,7 +146,8 @@ async function checkSSH(host: string, config: BscsConfig): Promise<DoctorCheck> 
   }
   return {
     category: 'machine', target: host, name: 'SSH', status: 'error', message: 'Connection failed',
-    details: result.output, fix: `Check SSH config for ${target}`,
+    details: result.output, fix: `Ensure SSH key is authorized for ${target}`,
+    fixCommand: `ssh-copy-id ${target}`, autoFixable: false, fixTarget: 'local',
   };
 }
 
@@ -126,6 +162,7 @@ async function checkDocker(host: string, config: BscsConfig): Promise<DoctorChec
   return {
     category: 'machine', target: host, name: 'Docker', status: 'error', message: 'Not running',
     details: result.output, fix: 'Start Docker daemon',
+    fixCommand: 'open -a Docker', autoFixable: false, fixTarget: getFixTarget(host, config),
   };
 }
 
@@ -140,10 +177,18 @@ async function checkDisk(host: string, config: BscsConfig): Promise<DoctorCheck>
   const free = parts[1] || '?';
 
   if (usedPct >= 90) {
-    return { category: 'machine', target: host, name: 'Disk Space', status: 'critical', message: `${usedPct}% used (${free} free)`, fix: 'Free disk space or docker system prune' };
+    const ft = getFixTarget(host, config);
+    return { category: 'machine', target: host, name: 'Disk Space', status: 'critical', message: `${usedPct}% used (${free} free)`,
+      fix: 'Free disk space with docker system prune',
+      fixCommand: 'export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"; docker system prune -f',
+      autoFixable: false, fixTarget: ft };
   }
   if (usedPct >= 80) {
-    return { category: 'machine', target: host, name: 'Disk Space', status: 'warn', message: `${usedPct}% used (${free} free)`, fix: 'Consider freeing disk space' };
+    const ft = getFixTarget(host, config);
+    return { category: 'machine', target: host, name: 'Disk Space', status: 'warn', message: `${usedPct}% used (${free} free)`,
+      fix: 'Consider freeing disk space with docker system prune',
+      fixCommand: 'export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"; docker system prune -f',
+      autoFixable: false, fixTarget: ft };
   }
   return { category: 'machine', target: host, name: 'Disk Space', status: 'ok', message: `${usedPct}% used (${free} free)` };
 }
@@ -185,7 +230,8 @@ async function checkMemory(host: string, config: BscsConfig): Promise<DoctorChec
   }
 
   if (availableGB < 0.5) {
-    return { category: 'machine', target: host, name: 'Memory', status: 'critical', message: `${availableGB.toFixed(1)}GB available`, fix: 'Free memory — stop unused containers' };
+    return { category: 'machine', target: host, name: 'Memory', status: 'critical', message: `${availableGB.toFixed(1)}GB available`,
+      fix: 'Free memory — stop unused containers', autoFixable: false, fixTarget: getFixTarget(host, config) };
   }
   if (availableGB < 1) {
     return { category: 'machine', target: host, name: 'Memory', status: 'warn', message: `${availableGB.toFixed(1)}GB available` };
@@ -212,7 +258,8 @@ async function checkOpenClawVersion(host: string, config: BscsConfig): Promise<D
   if (result.ok && result.output) {
     return { category: 'machine', target: host, name: 'OpenClaw', status: 'ok', message: result.output };
   }
-  return { category: 'machine', target: host, name: 'OpenClaw', status: 'warn', message: 'Not found' };
+  return { category: 'machine', target: host, name: 'OpenClaw', status: 'warn', message: 'Not found',
+    fix: 'Install OpenClaw globally', fixCommand: 'npm install -g openclaw', autoFixable: false, fixTarget: getFixTarget(host, config) };
 }
 
 async function checkMachineHealth(host: string, config: BscsConfig): Promise<DoctorCheck[]> {
@@ -259,25 +306,42 @@ async function checkAgentContainer(agentName: string, agentConfig: any, config: 
       return { category: 'agent', target: agentName, name: 'Process', status: 'ok', message: 'running (native)' };
     }
     return { category: 'agent', target: agentName, name: 'Process', status: 'error', message: 'Not responding',
-      fix: `Restart native agent: launchctl kickstart gui/$(id -u)/ai.openclaw.${agentName}` };
+      fix: `Restart native agent: launchctl kickstart gui/$(id -u)/ai.openclaw.${agentName}`,
+      fixCommand: `launchctl kickstart -k gui/$(id -u)/ai.openclaw.${agentName}`,
+      autoFixable: false, fixTarget: getFixTarget(machine, config) };
   }
 
   // Docker runtime
   const cmd = remoteOrLocal(machine,
     `export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"; docker inspect --format '{{.State.Status}}|{{.State.StartedAt}}|{{.State.Health.Status}}' ${containerName} 2>/dev/null`,
     config);
+  const ft = getFixTarget(machine, config);
+  const pathPrefix = 'export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"; ';
   const result = await executeCommand(cmd);
   if (!result.ok || !result.output) {
     return { category: 'agent', target: agentName, name: 'Container', status: 'error', message: 'Not found',
-      fix: `docker start ${containerName}`, autoFixable: true };
+      fix: `Start container ${containerName}`, fixCommand: `${pathPrefix}docker start ${containerName}`,
+      autoFixable: true, fixTarget: ft };
   }
   const [status, _startedAt, healthStr] = result.output.split('|');
   const health = healthStr && healthStr !== '<no value>' ? ` (${healthStr})` : '';
   if (status === 'running') {
+    if (healthStr === 'unhealthy') {
+      return { category: 'agent', target: agentName, name: 'Container', status: 'warn', message: `running (unhealthy)`,
+        fix: `Restart container ${containerName}`, fixCommand: `${pathPrefix}docker restart ${containerName}`,
+        autoFixable: true, fixTarget: ft };
+    }
     return { category: 'agent', target: agentName, name: 'Container', status: 'ok', message: `running${health}` };
   }
+  if (status === 'restarting') {
+    return { category: 'agent', target: agentName, name: 'Container', status: 'error', message: 'restarting (crash loop)',
+      fix: `Restart container ${containerName}`, fixCommand: `${pathPrefix}docker restart ${containerName}`,
+      autoFixable: true, fixTarget: ft };
+  }
+  // exited, stopped, created, etc.
   return { category: 'agent', target: agentName, name: 'Container', status: 'error', message: status || 'unknown',
-    fix: `docker start ${containerName}`, autoFixable: true };
+    fix: `Start container ${containerName}`, fixCommand: `${pathPrefix}docker start ${containerName}`,
+    autoFixable: true, fixTarget: ft };
 }
 
 async function checkAgentGateway(agentName: string, agentConfig: any, config: BscsConfig): Promise<DoctorCheck> {
@@ -294,8 +358,19 @@ async function checkAgentGateway(agentName: string, agentConfig: any, config: Bs
   if (result.ok && (result.output.includes('"ok"') || result.output.includes('"live"') || result.output.includes('status'))) {
     return { category: 'agent', target: agentName, name: 'Gateway', status: 'ok', message: 'Responding' };
   }
+  const runtime = agentConfig.runtime || 'docker';
+  const containerName = agentConfig.container || `openclaw_${agentName}`;
+  const ft = getFixTarget(machine, config);
+  const pathPrefix = 'export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"; ';
+  if (runtime === 'docker') {
+    return { category: 'agent', target: agentName, name: 'Gateway', status: 'error', message: 'Not responding',
+      details: result.output || 'No response',
+      fix: `Restart container ${containerName}`, fixCommand: `${pathPrefix}docker restart ${containerName}`,
+      autoFixable: true, fixTarget: ft };
+  }
   return { category: 'agent', target: agentName, name: 'Gateway', status: 'error', message: 'Not responding',
-    details: result.output || 'No response' };
+    details: result.output || 'No response',
+    fix: 'Restart the native agent process', autoFixable: false, fixTarget: ft };
 }
 
 async function checkAgentUptime(agentName: string, agentConfig: any, config: BscsConfig): Promise<DoctorCheck> {
@@ -402,7 +477,9 @@ async function checkOrphanedContainers(config: BscsConfig): Promise<DoctorCheck>
   if (orphans.length > 0) {
     return { category: 'fleet', target: 'fleet', name: 'Orphaned Containers', status: 'warn',
       message: `${orphans.length} orphaned container(s)`, details: orphans.join(', '),
-      fix: `docker rm -f ${orphans.join(' ')}`, autoFixable: true };
+      fix: `Remove orphaned containers: ${orphans.join(', ')}`,
+      fixCommand: `export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"; docker rm -f ${orphans.join(' ')}`,
+      autoFixable: false, fixTarget: 'local' };
   }
   return { category: 'fleet', target: 'fleet', name: 'Orphaned Containers', status: 'ok', message: 'No orphans' };
 }

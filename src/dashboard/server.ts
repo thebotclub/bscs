@@ -355,6 +355,38 @@ export function startDashboardServer(port = 3200): Promise<DashboardServer> {
             return;
           }
           
+          // POST /api/doctor/fix
+          if (url === '/api/doctor/fix' && method === 'POST') {
+            const body = await readBody(req);
+            let payload: any;
+            try {
+              payload = JSON.parse(body);
+            } catch {
+              jsonResponse(res, { ok: false, message: 'Invalid JSON' }, 400);
+              return;
+            }
+
+            const { target, command } = payload;
+            if (!command) {
+              jsonResponse(res, { ok: false, message: 'Missing command' }, 400);
+              return;
+            }
+
+            let cmd: string;
+
+            if (!target || target === 'local') {
+              cmd = command;
+            } else {
+              // target is sshAlias or host — run via SSH
+              const escaped = command.replace(/'/g, "'\\''");
+              cmd = `ssh -o ConnectTimeout=10 -o BatchMode=yes ${target} '${escaped}'`;
+            }
+
+            const result = await executeCommand(cmd, 30000);
+            jsonResponse(res, { ok: result.ok, output: result.output || (result.ok ? 'Fix applied' : 'Fix failed') });
+            return;
+          }
+
           // GET /api/doctor or /api/doctor?deep=true
           if (url.startsWith('/api/doctor') && method === 'GET') {
             const config = loadConfig();
@@ -364,6 +396,12 @@ export function startDashboardServer(port = 3200): Promise<DashboardServer> {
             try {
               const { runDoctor } = await import('../core/doctor.js');
               const result = await runDoctor(config, deep);
+              // Enrich machines with names
+              const enrichedMachines: Record<string, any> = {};
+              for (const [ip, status] of Object.entries(result.machines)) {
+                enrichedMachines[ip] = { status, name: getMachineName(ip, config) };
+              }
+              (result as any).machines = enrichedMachines;
               jsonResponse(res, result);
             } catch (err) {
               jsonResponse(res, { error: 'Doctor failed', message: (err as Error).message }, 500);
@@ -1294,7 +1332,9 @@ async function deleteAgent(name) {
 }
 
 async function showLogs(name) {
-  document.getElementById('logs-agent-name').textContent = name;
+  var agent = fleetData && fleetData.agents && fleetData.agents.find(function(a) { return a.name === name; });
+  var machineSuffix = agent ? ' (' + (agent.machineName || agent.machine || '') + ')' : '';
+  document.getElementById('logs-agent-name').textContent = name + machineSuffix;
   document.getElementById('logs-content').textContent = 'Loading…';
   openModal('logs-modal');
 
@@ -1559,9 +1599,12 @@ async function runDoctor() {
     Object.values(groups).forEach(function(g) {
       var label = '';
       if (g.category === 'machine') {
-        var mStatus = (data.machines && data.machines[g.target]) || 'unknown';
+        var mObj = data.machines && data.machines[g.target];
+        var mStatus = mObj ? (mObj.status || mObj) : 'unknown';
         var mColor = mStatus === 'online' ? 'var(--green)' : 'var(--red)';
-        label = '🖥️ Machine: ' + esc(g.target) + ' <span style="color:' + mColor + ';font-size:0.75rem;">[' + mStatus + ']</span>';
+        var mName = (mObj && mObj.name) ? mObj.name : g.target;
+        var mIp = mName !== g.target ? ' (' + esc(g.target) + ')' : '';
+        label = '🖥️ Machine: ' + esc(mName) + mIp + ' <span style="color:' + mColor + ';font-size:0.75rem;">[' + mStatus + ']</span>';
       } else if (g.category === 'agent') {
         label = '🤖 Agent: ' + esc(g.target);
       } else {
@@ -1576,7 +1619,12 @@ async function runDoctor() {
           '<td style="padding:3px 8px;width:10%;color:' + statusColor(c.status) + ';font-size:0.8rem;">' + statusIcon(c.status) + '</td>' +
           '<td style="padding:3px 8px;color:var(--text-dim);font-size:0.8rem;">' + esc(c.message || '');
         if (c.details) html += ' <span style="opacity:0.7;">(' + esc(c.details) + ')</span>';
-        if (c.fix) html += ' <span style="color:var(--blue);font-size:0.7rem;" title="' + esc(c.fix) + '">💡 Fix</span>';
+        if (c.fix && c.fixCommand) {
+          var btnClass = c.autoFixable ? 'btn-primary' : '';
+          html += ' <button class="btn btn-sm ' + btnClass + '" style="font-size:0.7rem;padding:1px 6px;margin-left:4px;" onclick="fixDoctorCheck(\'' + esc(c.fixCommand).replace(/'/g, "\\\\'") + '\',\'' + esc(c.fixTarget || 'local') + '\',this)" title="' + esc(c.fix) + '">🔧 Fix</button>';
+        } else if (c.fix) {
+          html += ' <span style="color:var(--blue);font-size:0.7rem;" title="' + esc(c.fix) + '">💡 ' + esc(c.fix) + '</span>';
+        }
         html += '</td></tr>';
       });
       html += '</table></div>';
@@ -1596,9 +1644,63 @@ async function runDoctor() {
     scoreEl.innerHTML = parts.join(' | ') + '<br><span style="font-size:0.8rem;color:var(--text-dim);font-weight:400;">' + data.mode + ' mode · ' + ((data.duration || 0) / 1000).toFixed(1) + 's</span>';
     scoreEl.style.color = (s.error || s.critical) ? 'var(--red)' : s.warn ? 'var(--yellow)' : 'var(--green)';
     scoreEl.style.display = 'block';
+
+    // Add "Fix All" button if there are auto-fixable issues
+    var autoFixable = checks.filter(function(c) { return c.autoFixable && c.fixCommand && c.status !== 'ok'; });
+    if (autoFixable.length > 0) {
+      scoreEl.innerHTML += '<br><button class="btn btn-primary btn-sm" style="margin-top:0.5rem;" onclick="fixAllDoctor()">🔧 Fix All (' + autoFixable.length + ' auto-fixable)</button>';
+    }
+
+    // Store checks for fixAll
+    window._doctorChecks = checks;
   } catch (err) {
     document.getElementById('doctor-content').innerHTML = '<div style="color:var(--red);text-align:center;">❌ Doctor failed: ' + esc(err.message) + '</div>';
   }
+}
+
+async function fixDoctorCheck(command, target, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+  try {
+    var data = await safeFetchJson('/api/doctor/fix', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ command: command, target: target })
+    });
+    if (data.ok) {
+      showToast('Fix applied: ' + (data.output || 'OK'), 'success');
+      if (btn) { btn.textContent = '✅'; btn.style.color = 'var(--green)'; }
+    } else {
+      showToast('Fix failed: ' + (data.output || 'Unknown error'), 'error');
+      if (btn) { btn.textContent = '❌'; btn.disabled = false; }
+    }
+  } catch (err) {
+    showToast('Fix failed: ' + err.message, 'error');
+    if (btn) { btn.textContent = '❌'; btn.disabled = false; }
+  }
+}
+
+async function fixAllDoctor() {
+  var checks = window._doctorChecks || [];
+  var fixable = checks.filter(function(c) { return c.autoFixable && c.fixCommand && c.status !== 'ok'; });
+  if (fixable.length === 0) { showToast('No auto-fixable issues', 'info'); return; }
+
+  showToast('Fixing ' + fixable.length + ' issue(s)…', 'info');
+
+  for (var i = 0; i < fixable.length; i++) {
+    var c = fixable[i];
+    try {
+      await safeFetchJson('/api/doctor/fix', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ command: c.fixCommand, target: c.fixTarget || 'local' })
+      });
+    } catch (err) {
+      showToast('Fix failed for ' + c.name + ': ' + err.message, 'error');
+    }
+  }
+
+  showToast('All fixes applied — re-running doctor…', 'success');
+  setTimeout(function() { runDoctor(); }, 2000);
 }
 
 // ===================== Init =====================

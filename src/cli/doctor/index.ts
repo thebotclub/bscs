@@ -3,7 +3,7 @@ import chalk from 'chalk';
 import { execSync } from 'child_process';
 import { createLogger } from '../../util/logger.js';
 import { loadConfig } from '../../core/config.js';
-import { runDoctor, type DoctorResult } from '../../core/doctor.js';
+import { runDoctor, fixDoctorIssue, type DoctorResult } from '../../core/doctor.js';
 
 const logger = createLogger('doctor');
 
@@ -170,6 +170,10 @@ function formatFleetDoctor(result: DoctorResult, config: any): void {
       const icon = getStatusIcon(check.status);
       let line = `  ${icon} ${check.name}: ${check.message}`;
       if (check.details) line += chalk.gray(` (${check.details})`);
+      if (check.fix && check.status !== 'ok') {
+        line += chalk.blue(` 💡 ${check.fix}`);
+        if (check.autoFixable) line += chalk.green(' [auto-fixable]');
+      }
       console.log(line);
     }
     console.log();
@@ -193,6 +197,10 @@ function formatFleetDoctor(result: DoctorResult, config: any): void {
       const icon = getStatusIcon(check.status);
       let line = `  ${icon} ${check.name}: ${check.message}`;
       if (check.details) line += chalk.gray(` (${check.details})`);
+      if (check.fix && check.status !== 'ok') {
+        line += chalk.blue(` 💡 ${check.fix}`);
+        if (check.autoFixable) line += chalk.green(' [auto-fixable]');
+      }
       console.log(line);
     }
     console.log();
@@ -206,6 +214,10 @@ function formatFleetDoctor(result: DoctorResult, config: any): void {
       const icon = getStatusIcon(check.status);
       let line = `  ${icon} ${check.name}: ${check.message}`;
       if (check.details) line += chalk.gray(` (${check.details})`);
+      if (check.fix && check.status !== 'ok') {
+        line += chalk.blue(` 💡 ${check.fix}`);
+        if (check.autoFixable) line += chalk.green(' [auto-fixable]');
+      }
       console.log(line);
     }
     console.log();
@@ -236,7 +248,8 @@ export function createDoctorCommand(): Command {
     .option('--json', 'Output as JSON')
     .option('--fleet', 'Run fleet-wide doctor checks across all machines')
     .option('--deep', 'Run deep checks (extended diagnostics, log scanning)')
-    .action(async (options: { json?: boolean; fleet?: boolean; deep?: boolean }) => {
+    .option('--fix', 'Auto-fix all fixable issues (use with --fleet)')
+    .action(async (options: { json?: boolean; fleet?: boolean; deep?: boolean; fix?: boolean }) => {
       // Fleet doctor mode
       if (options.fleet) {
         logger.debug('Running fleet doctor');
@@ -252,6 +265,30 @@ export function createDoctorCommand(): Command {
           }
 
           formatFleetDoctor(result, config);
+
+          // Auto-fix mode
+          if (options.fix) {
+            const fixable = result.checks.filter(c => c.autoFixable && c.fixCommand && c.status !== 'ok');
+            if (fixable.length === 0) {
+              console.log(chalk.gray('No auto-fixable issues found.'));
+            } else {
+              console.log(chalk.bold.yellow(`\n🔧 Auto-fixing ${fixable.length} issue(s)…\n`));
+              for (const check of fixable) {
+                process.stdout.write(`  Fixing ${check.target} → ${check.name}… `);
+                const fixResult = await fixDoctorIssue(check, config);
+                if (fixResult.ok) {
+                  console.log(chalk.green('✓ ') + chalk.gray(fixResult.message));
+                } else {
+                  console.log(chalk.red('✗ ') + chalk.gray(fixResult.message));
+                }
+              }
+
+              // Re-run doctor to show updated state
+              console.log(chalk.bold('\n🩺 Re-running doctor…\n'));
+              const recheck = await runDoctor(config, deep);
+              formatFleetDoctor(recheck, config);
+            }
+          }
 
           // Exit with error code if critical issues
           if (result.score.critical > 0 || result.score.error > 0) {
