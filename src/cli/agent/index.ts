@@ -1,7 +1,5 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
-import { execSync } from 'child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import {
@@ -13,151 +11,18 @@ import {
   listBscsContainers,
   pullImage,
 } from '../../core/docker.js';
-import { loadConfig, saveConfig, type BscsConfig } from '../../core/config.js';
+import { loadConfig, saveConfig } from '../../core/config.js';
+import {
+  allocatePorts,
+  setupTribunal,
+  type TribunalSetupResult,
+  getResourcesForRole,
+  getModelForRole,
+} from '../../core/agent.js';
 import { createLogger } from '../../util/logger.js';
 import type { AgentRole } from '../../util/types.js';
 
 const logger = createLogger('agent');
-
-// Allocate ports for a new agent
-async function allocatePorts(config: BscsConfig): Promise<{ gateway?: number; remote?: number }> {
-  const start = config.defaults?.portRange?.start || 19000;
-  const end = config.defaults?.portRange?.end || 19999;
-  const usedPorts = new Set<number>();
-  
-  // Collect used ports from existing agents in config
-  if (config.agents) {
-    for (const agent of Object.values(config.agents)) {
-      if (agent.ports) {
-        if (agent.ports.gateway) usedPorts.add(agent.ports.gateway);
-        if (agent.ports.remote) usedPorts.add(agent.ports.remote);
-      }
-    }
-  }
-  
-  // Also check running Docker containers
-  try {
-    const { listBscsContainers } = await import('../../core/docker.js');
-    const containers = await listBscsContainers();
-    for (const c of containers) {
-      if (c.ports?.gateway) usedPorts.add(c.ports.gateway);
-      if (c.ports?.remote) usedPorts.add(c.ports.remote);
-    }
-  } catch {
-    // Docker not available, continue with config-only check
-  }
-  
-  // Find next available port pair
-  for (let port = start; port <= end - 1; port += 2) {
-    if (!usedPorts.has(port) && !usedPorts.has(port + 1)) {
-      return { gateway: port, remote: port + 1 };
-    }
-  }
-  
-  throw new Error('No available ports in configured range');
-}
-
-// Tribunal installation for coding agents
-interface TribunalSetupResult {
-  installed: boolean;
-  path?: string;
-  error?: string;
-}
-
-async function setupTribunal(agentName: string, agentPath: string): Promise<TribunalSetupResult> {
-  try {
-    // Check if pip/pipx is available
-    let pipCmd = 'pip';
-    try {
-      execSync('command -v pipx', { stdio: 'ignore' });
-      pipCmd = 'pipx';
-    } catch {
-      try {
-        execSync('command -v pip3', { stdio: 'ignore' });
-        pipCmd = 'pip3';
-      } catch {
-        // Fall back to pip
-      }
-    }
-    
-    // Install tribunal
-    console.log(chalk.dim(`  Installing Tribunal via ${pipCmd}...`));
-    execSync(`${pipCmd} install tribunal`, { stdio: 'inherit' });
-    
-    // Create .tribunal directory
-    const tribunalDir = join(agentPath, '.tribunal');
-    if (!existsSync(tribunalDir)) {
-      mkdirSync(tribunalDir, { recursive: true });
-    }
-    
-    // Create tribunal config
-    const tribunalConfig = {
-      version: '1.0',
-      agent: {
-        name: agentName,
-        type: 'coding',
-      },
-      hooks: {
-        preToolUse: ['tribunal check'],
-        postToolUse: ['tribunal log'],
-      },
-      rules: {
-        preventFileDeletion: true,
-        preventCommandExecution: ['rm -rf', 'sudo'],
-        requireApprovalFor: ['npm publish', 'git push'],
-      },
-    };
-    
-    writeFileSync(join(tribunalDir, 'config.json'), JSON.stringify(tribunalConfig, null, 2));
-    
-    // Create .claude directory and settings
-    const claudeDir = join(agentPath, '.claude');
-    if (!existsSync(claudeDir)) {
-      mkdirSync(claudeDir, { recursive: true });
-    }
-    
-    const claudeSettings = {
-      permissions: {
-        allow: ['Read', 'Edit', 'Write', 'Bash(npm *)', 'Bash(git *)'],
-        deny: ['Bash(rm -rf /*)', 'Bash(sudo *)'],
-      },
-      hooks: {
-        PreToolUse: [
-          {
-            matcher: 'Bash',
-            hooks: [{ type: 'command', command: 'tribunal check --hook bash' }],
-          },
-        ],
-      },
-    };
-    
-    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(claudeSettings, null, 2));
-    
-    return { installed: true, path: tribunalDir };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { installed: false, error: message };
-  }
-}
-
-// Get resources for a role
-function getResourcesForRole(role: AgentRole, config: BscsConfig): { memory: string; pidsLimit: number } {
-  // Map role to resource key (security, marketing, custom fall back to default)
-  const resourceKey: 'coding' | 'review' | 'brain' | 'ops' | 'default' = 
-    (['coding', 'review', 'brain', 'ops'] as const).includes(role as 'coding' | 'review' | 'brain' | 'ops')
-      ? role as 'coding' | 'review' | 'brain' | 'ops'
-      : 'default';
-  const resources = config.docker?.resources?.[resourceKey] || config.docker?.resources?.default;
-  return {
-    memory: resources?.memory || '2g',
-    pidsLimit: resources?.pidsLimit || 256,
-  };
-}
-
-// Get model for a role
-function getModelForRole(role: AgentRole, config: BscsConfig): string {
-  return config.models?.defaults?.[role] || 'claude-sonnet-4';
-}
 
 export function createAgentCreateCommand(): Command {
   return new Command('create')

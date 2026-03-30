@@ -2,6 +2,15 @@
  * Template: Generate docker-compose.yml snippets for agents.
  */
 
+// Agent name must match schema regex — prevents injection into container_name / env vars
+const AGENT_NAME_RE = /^[a-z][a-z0-9-]{1,30}$/;
+
+function assertSafeName(name: string): void {
+  if (!AGENT_NAME_RE.test(name)) {
+    throw new Error(`Invalid agent name "${name}": must match ^[a-z][a-z0-9-]{1,30}$`);
+  }
+}
+
 export interface ComposeServiceOptions {
   name: string;
   image: string;
@@ -31,6 +40,7 @@ export interface ComposeService {
 
 export function generateComposeService(options: ComposeServiceOptions): ComposeService {
   const { name, image, ports, memory = '2g', pidsLimit = 256, env = {}, volumes = {} } = options;
+  assertSafeName(name);
 
   return {
     image,

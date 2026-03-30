@@ -54,12 +54,16 @@ export function getCostData(period: string): CostEntry[] {
 
   // Get date range based on period
   const startDate = new Date();
-  
+  let endDate: Date | null = null;
+
   if (period === 'today') {
     startDate.setHours(0, 0, 0, 0);
   } else if (period === 'yesterday') {
+    // yesterday: exactly midnight-to-midnight (does NOT include today)
     startDate.setDate(today.getDate() - 1);
     startDate.setHours(0, 0, 0, 0);
+    endDate = new Date(today);
+    endDate.setHours(0, 0, 0, 0); // midnight = start of today
   } else if (period === 'week') {
     startDate.setDate(today.getDate() - 7);
   } else if (period === 'month') {
@@ -67,11 +71,11 @@ export function getCostData(period: string): CostEntry[] {
   }
 
   const startStr = startDate.toISOString().slice(0, 10);
-  const todayStr = today.toISOString().slice(0, 10);
+  const endStr = endDate ? endDate.toISOString().slice(0, 10) : today.toISOString().slice(0, 10);
 
   for (const file of files) {
     const fileDate = file.slice(0, 10);
-    if (fileDate >= startStr && fileDate <= todayStr) {
+    if (fileDate >= startStr && fileDate <= endStr) {
       try {
         const content = readFileSync(join(COST_DATA_DIR, file), 'utf-8');
         const lines = content.trim().split('\n');
@@ -102,41 +106,53 @@ export function generateCostReport(
 ): CostReport {
   const today = new Date();
   const startDate = new Date();
-  
+  let periodEnd = today;
+
   if (period === 'today') {
     startDate.setHours(0, 0, 0, 0);
   } else if (period === 'yesterday') {
     startDate.setDate(today.getDate() - 1);
     startDate.setHours(0, 0, 0, 0);
+    periodEnd = new Date(today);
+    periodEnd.setHours(0, 0, 0, 0); // midnight = start of today, end of yesterday
   } else if (period === 'week') {
     startDate.setDate(today.getDate() - 7);
   } else if (period === 'month') {
     startDate.setMonth(today.getMonth() - 1);
   }
 
-  const total = entries.reduce((sum, e) => sum + e.cost, 0);
+  // For yesterday, only count entries within the exact day
+  const effectiveEntries =
+    period === 'yesterday'
+      ? entries.filter((e) => {
+          const ts = new Date(e.timestamp);
+          return ts >= startDate && ts < periodEnd;
+        })
+      : entries;
+
+  const total = effectiveEntries.reduce((sum, e) => sum + e.cost, 0);
 
   const report: CostReport = {
     period: {
       start: startDate.toISOString(),
-      end: today.toISOString(),
+      end: periodEnd.toISOString(),
     },
     total,
   };
 
   if (groupBy === 'agent') {
     report.byAgent = {};
-    for (const entry of entries) {
+    for (const entry of effectiveEntries) {
       report.byAgent[entry.agent] = (report.byAgent[entry.agent] ?? 0) + entry.cost;
     }
   } else if (groupBy === 'model') {
     report.byModel = {};
-    for (const entry of entries) {
+    for (const entry of effectiveEntries) {
       report.byModel[entry.model] = (report.byModel[entry.model] ?? 0) + entry.cost;
     }
   } else if (groupBy === 'provider') {
     report.byProvider = {};
-    for (const entry of entries) {
+    for (const entry of effectiveEntries) {
       report.byProvider[entry.provider] = (report.byProvider[entry.provider] ?? 0) + entry.cost;
     }
   }

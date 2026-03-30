@@ -82,8 +82,8 @@ describe('Templates', () => {
 
     it('should generate compose file for multiple services', () => {
       const file = generateComposeFile([
-        { name: 'a', image: 'test:1', ports: { gateway: 19000, remote: 19001 } },
-        { name: 'b', image: 'test:2', ports: { gateway: 19002, remote: 19003 } },
+        { name: 'aa', image: 'test:1', ports: { gateway: 19000, remote: 19001 } },
+        { name: 'bb', image: 'test:2', ports: { gateway: 19002, remote: 19003 } },
       ]);
       const parsed = JSON.parse(file);
       expect(Object.keys(parsed.services)).toHaveLength(2);
@@ -106,8 +106,8 @@ describe('Templates', () => {
 
     it('should not overwrite existing files', () => {
       const basePath = join(tempDir, 'workspace2');
-      generateWorkspace({ basePath, agentName: 'a', role: 'coding' });
-      const created2 = generateWorkspace({ basePath, agentName: 'a', role: 'coding' });
+      generateWorkspace({ basePath, agentName: 'aa', role: 'coding' });
+      const created2 = generateWorkspace({ basePath, agentName: 'aa', role: 'coding' });
       // Nothing new should be created since files already exist
       expect(created2).toHaveLength(0);
     });
@@ -117,6 +117,36 @@ describe('Templates', () => {
       expect(path).toContain('agents');
       expect(path).toContain('test-agent');
       expect(path).toContain('workspace');
+    });
+
+    it('should throw on path traversal agent name', () => {
+      expect(() => getWorkspacePath('/base', '../../etc/passwd')).toThrow(/invalid agent name/i);
+    });
+
+    it('should throw on agent name with shell-special chars', () => {
+      expect(() => generateWorkspace({ basePath: '/tmp', agentName: 'bad;name', role: 'coding' })).toThrow(/invalid agent name/i);
+    });
+
+    it('should throw on uppercase agent name', () => {
+      expect(() => generateWorkspace({ basePath: '/tmp', agentName: 'BadAgent', role: 'coding' })).toThrow(/invalid agent name/i);
+    });
+  });
+
+  describe('docker-compose sanitization', () => {
+    it('should throw on agent name with spaces', () => {
+      expect(() => generateComposeService({
+        name: 'bad name',
+        image: 'test:latest',
+        ports: { gateway: 19000, remote: 19001 },
+      })).toThrow(/invalid agent name/i);
+    });
+
+    it('should throw on agent name with slash', () => {
+      expect(() => generateComposeService({
+        name: 'bad/name',
+        image: 'test:latest',
+        ports: { gateway: 19000, remote: 19001 },
+      })).toThrow(/invalid agent name/i);
     });
   });
 });

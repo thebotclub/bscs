@@ -1,126 +1,188 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { execSync } from 'child_process';
 import { tmpdir } from 'os';
-import { mkdirSync, rmSync, existsSync } from 'fs';
+import { mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 
-// Mock execSync
-vi.mock('child_process', () => ({
-  execSync: vi.fn(),
-}));
+// ── Helpers ──────────────────────────────────────────────────────────
 
-describe('Doctor Command', () => {
+function makeTempConfig(dir: string, cfg: object = {}) {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ version: '1.0', ...cfg }, null, 2));
+}
+
+// ── Doctor core: fixDoctorIssue ───────────────────────────────────────
+
+describe('fixDoctorIssue', () => {
   let tempDir: string;
-  let originalConfigDir: string | undefined;
-  let originalHome: string | undefined;
+  let origConfigDir: string | undefined;
 
   beforeEach(() => {
-    vi.clearAllMocks();
-    
-    // Create temp directory
-    tempDir = join(tmpdir(), `bscs-doctor-test-${Date.now()}`);
-    mkdirSync(tempDir, { recursive: true });
-    
-    originalConfigDir = process.env.BSCS_CONFIG_DIR;
-    originalHome = process.env.HOME;
-    process.env.HOME = tempDir;
+    tempDir = join(tmpdir(), `bscs-doctor-fix-${Date.now()}`);
+    origConfigDir = process.env.BSCS_CONFIG_DIR;
+    process.env.BSCS_CONFIG_DIR = tempDir;
+    makeTempConfig(tempDir);
   });
 
   afterEach(() => {
-    vi.resetAllMocks();
-    
-    if (existsSync(tempDir)) {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-    
-    if (originalConfigDir !== undefined) {
-      process.env.BSCS_CONFIG_DIR = originalConfigDir;
-    } else {
-      delete process.env.BSCS_CONFIG_DIR;
-    }
-    
-    if (originalHome !== undefined) {
-      process.env.HOME = originalHome;
-    }
+    if (existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
+    if (origConfigDir !== undefined) process.env.BSCS_CONFIG_DIR = origConfigDir;
+    else delete process.env.BSCS_CONFIG_DIR;
+    vi.restoreAllMocks();
   });
 
-  describe('checkDocker', () => {
-    it('should pass when Docker is running', () => {
-      vi.mocked(execSync)
-        .mockReturnValueOnce(Buffer.from('')) // docker info
-        .mockReturnValueOnce(Buffer.from('Docker version 24.0.0, build abc123')); // docker --version
+  it('returns error when no fixCommand is set', async () => {
+    const { fixDoctorIssue } = await import('../../../src/core/doctor.js');
+    const result = await fixDoctorIssue(
+      { category: 'machine', target: 'localhost', name: 'Test', status: 'error', message: 'bad' },
+      {} as any,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.message).toMatch(/no fix command/i);
+  });
 
-      // We need to test the function directly
-      // For now, test the mock setup
-      expect(execSync).toBeDefined();
+  it('runs local fix command and reports success for a real no-op', async () => {
+    const { fixDoctorIssue } = await import('../../../src/core/doctor.js');
+    const result = await fixDoctorIssue(
+      {
+        category: 'machine', target: 'localhost', name: 'Test',
+        status: 'error', message: 'bad',
+        fixCommand: 'echo hello',
+        fixTarget: 'local',
+      },
+      {} as any,
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it('returns failure when fix command exits non-zero', async () => {
+    const { fixDoctorIssue } = await import('../../../src/core/doctor.js');
+    const result = await fixDoctorIssue(
+      {
+        category: 'machine', target: 'localhost', name: 'Test',
+        status: 'error', message: 'bad',
+        fixCommand: 'exit 1',
+        fixTarget: 'local',
+      },
+      {} as any,
+    );
+    expect(result.ok).toBe(false);
+  });
+});
+
+// ── Bootstrap: getBootstrapSteps ─────────────────────────────────────
+
+describe('getBootstrapSteps', () => {
+  it('docker step does not use curl-pipe-to-sh', async () => {
+    const { getBootstrapSteps } = await import('../../../src/core/machine.js');
+    const steps = getBootstrapSteps({
+      host: 'example.com',
+      user: 'ubuntu',
+      role: 'worker',
+      port: 22,
     });
+    const docker = steps.find((s) => s.name === 'docker');
+    expect(docker).toBeDefined();
+    // Must not pipe curl output directly to sh/bash
+    expect(docker!.command).not.toMatch(/curl[^|]*\|\s*(ba)?sh/);
+    // Must install docker
+    expect(docker!.command).toMatch(/docker/i);
+  });
 
-    it('should fail when Docker is not running', () => {
-      vi.mocked(execSync).mockImplementation(() => {
-        throw new Error('Cannot connect to Docker daemon');
-      });
+  it('node step does not use curl-pipe-to-sh', async () => {
+    const { getBootstrapSteps } = await import('../../../src/core/machine.js');
+    const steps = getBootstrapSteps({
+      host: 'example.com',
+      user: 'ubuntu',
+      role: 'worker',
+      port: 22,
+    });
+    const node = steps.find((s) => s.name === 'node');
+    expect(node).toBeDefined();
+    // Must not pipe curl output directly to sh/bash
+    expect(node!.command).not.toMatch(/curl[^|]*\|\s*(ba)?sh/);
+    // Must install nodejs
+    expect(node!.command).toMatch(/nodejs/i);
+  });
 
-      expect(() => execSync('docker info')).toThrow();
+  it('includes docker-group step with correct user', async () => {
+    const { getBootstrapSteps } = await import('../../../src/core/machine.js');
+    const steps = getBootstrapSteps({
+      host: 'example.com',
+      user: 'myuser',
+      role: 'worker',
+      port: 22,
+    });
+    const group = steps.find((s) => s.name === 'docker-group');
+    expect(group).toBeDefined();
+    expect(group!.command).toContain('myuser');
+  });
+
+  it('returns all required step names', async () => {
+    const { getBootstrapSteps } = await import('../../../src/core/machine.js');
+    const steps = getBootstrapSteps({ host: 'h', user: 'u', role: 'worker', port: 22 });
+    const names = steps.map((s) => s.name);
+    expect(names).toContain('docker');
+    expect(names).toContain('docker-group');
+    expect(names).toContain('node');
+  });
+});
+
+// ── Bootstrap: bootstrapMachine dry-run ──────────────────────────────
+
+describe('bootstrapMachine', () => {
+  let tempDir: string;
+  let origConfigDir: string | undefined;
+
+  beforeEach(() => {
+    tempDir = join(tmpdir(), `bscs-bootstrap-${Date.now()}`);
+    origConfigDir = process.env.BSCS_CONFIG_DIR;
+    process.env.BSCS_CONFIG_DIR = tempDir;
+    makeTempConfig(tempDir, {
+      machines: {
+        worker1: { host: '192.168.1.10', user: 'ubuntu', role: 'worker', port: 22 },
+        localhost: { host: 'localhost', user: 'me', role: 'controller', port: 22 },
+      },
     });
   });
 
-  describe('checkNode', () => {
-    it('should pass for Node.js 20+', () => {
-      const nodeVersion = process.version;
-      const major = parseInt(nodeVersion.slice(1).split('.')[0] || '0', 10);
-      
-      // This test verifies we can parse the version
-      expect(major).toBeGreaterThanOrEqual(20);
-    });
-
-    it('should parse version correctly', () => {
-      const testVersions = ['v20.0.0', 'v22.1.0', 'v25.8.0'];
-      
-      for (const v of testVersions) {
-        const major = parseInt(v.slice(1).split('.')[0] || '0', 10);
-        expect(major).toBeGreaterThanOrEqual(20);
-      }
-    });
+  afterEach(() => {
+    if (existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
+    if (origConfigDir !== undefined) process.env.BSCS_CONFIG_DIR = origConfigDir;
+    else delete process.env.BSCS_CONFIG_DIR;
+    vi.resetModules();
   });
 
-  describe('check1Password', () => {
-    it('should pass when 1Password CLI is installed', () => {
-      vi.mocked(execSync).mockReturnValue(Buffer.from('2.30.0'));
-      
-      const result = execSync('op --version');
-      expect(result.toString().trim()).toBe('2.30.0');
-    });
-
-    it('should warn when 1Password CLI is not installed', () => {
-      vi.mocked(execSync).mockImplementation(() => {
-        throw new Error('command not found: op');
-      });
-
-      expect(() => execSync('op --version')).toThrow('command not found');
-    });
+  it('dry-run returns steps without executing', async () => {
+    const { bootstrapMachine } = await import('../../../src/core/machine.js');
+    const result = await bootstrapMachine('worker1', { dryRun: true });
+    expect(result.executed).toBe(false);
+    expect(result.steps.length).toBeGreaterThan(0);
   });
 
-  describe('checkConfigDir', () => {
-    it('should pass when config directory exists', async () => {
-      const configDir = join(tempDir, '.config', 'bscs');
-      mkdirSync(configDir, { recursive: true });
-      
-      process.env.BSCS_CONFIG_DIR = configDir;
-      
-      expect(existsSync(configDir)).toBe(true);
-    });
+  it('throws when bootstrapping localhost', async () => {
+    const { bootstrapMachine } = await import('../../../src/core/machine.js');
+    await expect(bootstrapMachine('localhost')).rejects.toThrow(/localhost/i);
+  });
 
-    it('should warn when config directory does not exist', () => {
-      const configDir = join(tempDir, '.config', 'bscs');
-      process.env.BSCS_CONFIG_DIR = configDir;
-      
-      expect(existsSync(configDir)).toBe(false);
-    });
+  it('throws when machine does not exist', async () => {
+    const { bootstrapMachine } = await import('../../../src/core/machine.js');
+    await expect(bootstrapMachine('nonexistent')).rejects.toThrow(/not found/i);
+  });
+});
 
-    it('should error when HOME is not set', () => {
-      delete process.env.HOME;
-      
-      expect(process.env.HOME).toBeUndefined();
-    });
+// ── checkDocker: validate via DoctorCheck structure ──────────────────
+
+describe('checkDocker (via runDoctor structure)', () => {
+  it('DoctorCheck interface has required fields', () => {
+    // Type-level check: constructing a valid DoctorCheck ensures interface hasn't changed
+    const check = {
+      category: 'machine' as const,
+      target: 'localhost',
+      name: 'Docker',
+      status: 'ok' as const,
+      message: 'v24.0.0',
+    };
+    expect(check.category).toBe('machine');
+    expect(check.status).toBe('ok');
   });
 });

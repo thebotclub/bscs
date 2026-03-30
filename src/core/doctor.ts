@@ -1,4 +1,5 @@
 import { exec, execSync } from 'child_process';
+import { userInfo } from 'os';
 import type { BscsConfig } from '../util/types.js';
 
 // =============================================================================
@@ -61,9 +62,9 @@ function isLocalMachine(host: string): boolean {
 }
 
 function getSshTarget(machineHost: string, config: BscsConfig): string {
-  const machine = (config.machines as any)?.[machineHost];
+  const machine = config.machines?.[machineHost];
   if (machine?.sshAlias) return machine.sshAlias;
-  const user = machine?.user || 'hani';
+  const user = machine?.user || userInfo().username;
   return `${user}@${machineHost}`;
 }
 
@@ -89,12 +90,10 @@ function formatUptime(seconds: number): string {
   return parts.join(' ');
 }
 
-function detectOS(host: string, config: BscsConfig): 'macos' | 'linux' {
-  // Heuristic: machines with sshAlias like "mini*" or known macOS hosts
-  const machine = (config.machines as any)?.[host];
-  const alias = machine?.sshAlias || '';
-  if (alias.startsWith('mini') || host.includes('mini')) return 'macos';
-  if (isLocalMachine(host) && process.platform === 'darwin') return 'macos';
+async function detectOS(host: string, config: BscsConfig): Promise<'macos' | 'linux'> {
+  const cmd = remoteOrLocal(host, 'uname -s', config);
+  const result = await executeCommand(cmd, 5000);
+  if (result.ok && result.output.trim().toLowerCase() === 'darwin') return 'macos';
   return 'linux';
 }
 
@@ -104,8 +103,7 @@ function detectOS(host: string, config: BscsConfig): 'macos' | 'linux' {
 
 function getFixTarget(host: string, config: BscsConfig): string {
   if (isLocalMachine(host)) return 'local';
-  const machine = (config.machines as any)?.[host];
-  return machine?.sshAlias || host;
+  return config.machines?.[host]?.sshAlias || host;
 }
 
 export async function fixDoctorIssue(check: DoctorCheck, _config: BscsConfig): Promise<{ ok: boolean; message: string }> {
@@ -194,7 +192,7 @@ async function checkDisk(host: string, config: BscsConfig): Promise<DoctorCheck>
 }
 
 async function checkMemory(host: string, config: BscsConfig): Promise<DoctorCheck> {
-  const os = detectOS(host, config);
+  const os = await detectOS(host, config);
   let cmd: string;
   if (os === 'macos') {
     cmd = remoteOrLocal(host,

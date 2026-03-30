@@ -88,7 +88,7 @@ function checkProviderStatus(name: string, provider: Provider): ProviderStatus {
     });
   }
 
-  const hasKey = provider.apiKey && (provider.apiKey.startsWith('op://') || provider.apiKey.length > 10);
+  const hasKey = provider.apiKey && provider.apiKey.length > 0;
   
   return ProviderStatusSchema.parse({
     name,
@@ -191,10 +191,7 @@ export async function testProvider(name: string): Promise<{ success: boolean; er
       }
     }
 
-    const hasValidKey = Boolean(provider.apiKey && (
-      provider.apiKey.startsWith('op://') ||
-      provider.apiKey.length > 10
-    ));
+    const hasValidKey = Boolean(provider.apiKey && provider.apiKey.length > 0);
 
     return {
       success: hasValidKey,

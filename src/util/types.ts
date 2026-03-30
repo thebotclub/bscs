@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { userInfo } from 'os';
 
 // =============================================================================
 // Machine Configuration
@@ -8,9 +9,10 @@ export const MachineRoleSchema = z.enum(['controller', 'worker', 'gpu']);
 
 export const MachineSchema = z.object({
   host: z.string(),
-  user: z.string().default('hani'),
+  // Default to the current OS user; consumers can override per-machine
+  user: z.string().default(() => userInfo().username || process.env.USER || process.env.LOGNAME || 'root'),
   role: MachineRoleSchema,
-  port: z.number().default(22),
+  port: z.number().int().min(1).max(65535).default(22),
   sshAlias: z.string().optional(),
 });
 
@@ -127,8 +129,8 @@ export const AgentConfigSchema = z.object({
   configPath: z.string().optional(),
   ports: z
     .object({
-      gateway: z.number().optional(),
-      remote: z.number().optional(),
+      gateway: z.number().int().min(1).max(65535).optional(),
+      remote: z.number().int().min(1).max(65535).optional(),
     })
     .optional(),
   created: z.string().optional(),

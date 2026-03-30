@@ -2,7 +2,24 @@
  * Template: Generate workspace directory structure for agents.
  */
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { join, resolve } from 'path';
+
+// Agent name must match the schema regex — prevents path traversal
+const AGENT_NAME_RE = /^[a-z][a-z0-9-]{1,30}$/;
+
+function assertSafeName(name: string): void {
+  if (!AGENT_NAME_RE.test(name)) {
+    throw new Error(`Invalid agent name "${name}": must match ^[a-z][a-z0-9-]{1,30}$`);
+  }
+}
+
+function assertPathWithin(base: string, target: string): void {
+  const resolved = resolve(target);
+  const baseResolved = resolve(base);
+  if (!resolved.startsWith(baseResolved + '/') && resolved !== baseResolved) {
+    throw new Error(`Path traversal detected: "${target}" is not within "${base}"`);
+  }
+}
 
 export interface WorkspaceOptions {
   basePath: string;
@@ -47,6 +64,7 @@ _(Nothing recorded yet)_
 
 export function generateWorkspace(options: WorkspaceOptions): string[] {
   const { basePath, agentName, role } = options;
+  assertSafeName(agentName);
   const created: string[] = [];
 
   // Create directories
@@ -76,5 +94,8 @@ export function generateWorkspace(options: WorkspaceOptions): string[] {
 }
 
 export function getWorkspacePath(basePath: string, agentName: string): string {
-  return join(basePath, 'agents', agentName, 'workspace');
+  assertSafeName(agentName);
+  const p = join(basePath, 'agents', agentName, 'workspace');
+  assertPathWithin(basePath, p);
+  return p;
 }

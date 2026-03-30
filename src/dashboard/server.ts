@@ -3,22 +3,26 @@ import { existsSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { execSync, exec } from 'child_process';
+import { userInfo } from 'os';
 import chalk from 'chalk';
 import { createLogger } from '../util/logger.js';
-import { getFleetStatus } from '../cli/fleet/status.js';
+import { getFleetStatus } from '../core/fleet.js';
 import { getMachineStatus } from '../cli/machine/index.js';
-import { loadConfig, saveConfig, type BscsConfig } from '../core/config.js';
+import { loadConfig, saveConfig } from '../core/config.js';
+import type { BscsConfig, AgentConfig } from '../util/types.js';
 import { Command } from 'commander';
 import { createHash } from 'crypto';
+import { loadOrCreateAuthToken, validateAuthToken, extractBearerToken } from '../core/auth.js';
 
 
 const logger = createLogger('dashboard');
 
-// WebSocket clients
-const wsClients: Set<any> = new Set();
+// WebSocket clients (raw net.Socket instances)
+const wsClients: Set<import('net').Socket> = new Set();
 
 export interface DashboardServer {
   port: number;
+  token: string;
   close: () => void;
 }
 
@@ -41,14 +45,14 @@ function isLocalMachine(host: string): boolean {
 }
 
 function getMachineName(ip: string, config: BscsConfig): string {
-  const machine = (config.machines as any)?.[ip];
+  const machine = config.machines?.[ip];
   return machine?.sshAlias || ip;
 }
 
 function getSshTarget(machineHost: string, config: BscsConfig): string {
-  const machine = (config.machines as any)?.[machineHost];
+  const machine = config.machines?.[machineHost];
   if (machine?.sshAlias) return machine.sshAlias;
-  const user = machine?.user || 'hani';
+  const user = machine?.user || userInfo().username;
   return `${user}@${machineHost}`;
 }
 
@@ -65,7 +69,7 @@ function executeCommand(command: string, timeoutMs = 30000): Promise<{ ok: boole
 }
 
 async function executeAgentCommand(agentName: string, command: string, config: BscsConfig): Promise<{ ok: boolean; output: string }> {
-  const agent = (config.agents as any)?.[agentName];
+  const agent = config.agents?.[agentName];
   if (!agent) return { ok: false, output: 'Agent not found in config' };
 
   const machine = agent.machine || 'localhost';
@@ -81,10 +85,10 @@ async function executeAgentCommand(agentName: string, command: string, config: B
 }
 
 // Agent info cache: agent name → { data, timestamp }
-const agentInfoCache = new Map<string, { data: any; timestamp: number }>();
+const agentInfoCache = new Map<string, { data: Record<string, unknown>; timestamp: number }>();
 const AGENT_INFO_CACHE_TTL = 60000; // 60 seconds
 
-async function fetchAgentInfo(agentName: string, agentConfig: any, config: BscsConfig): Promise<any> {
+async function fetchAgentInfo(agentName: string, agentConfig: AgentConfig, config: BscsConfig): Promise<Record<string, unknown>> {
   // Check cache first
   const cached = agentInfoCache.get(agentName);
   if (cached && (Date.now() - cached.timestamp) < AGENT_INFO_CACHE_TTL) {
@@ -110,7 +114,7 @@ async function fetchAgentInfo(agentName: string, agentConfig: any, config: BscsC
 
   const result = await executeAgentCommand(agentName, cmd, config);
 
-  const info: any = {
+  const info: Record<string, unknown> = {
     name: agentName,
     machine: machine,
     machineName: getMachineName(machine, config),
@@ -175,6 +179,26 @@ function getNativeCommand(action: string, agentName: string): string {
 }
 
 // ============================================================================
+// CORS helper
+// ============================================================================
+
+function isAllowedOrigin(origin: string | undefined): boolean {
+  if (!origin) return false;
+  try {
+    const { hostname } = new URL(origin);
+    // Allow localhost (any port) and Tailscale (*.ts.net) origins
+    return (
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      hostname === '::1' ||
+      hostname.endsWith('.ts.net')
+    );
+  } catch {
+    return false;
+  }
+}
+
+// ============================================================================
 // API Handlers
 // ============================================================================
 
@@ -187,13 +211,13 @@ async function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
-function jsonResponse(res: ServerResponse, data: any, status = 200): void {
+function jsonResponse(res: ServerResponse, data: unknown, status = 200): void {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(data));
 }
 
 async function handleAgentAction(agentName: string, action: string, config: BscsConfig): Promise<{ ok: boolean; output: string }> {
-  const agent = (config.agents as any)?.[agentName];
+  const agent = config.agents?.[agentName];
   if (!agent) return { ok: false, output: `Agent "${agentName}" not found` };
 
   const runtime = agent.runtime || 'docker';
@@ -210,23 +234,23 @@ async function handleAgentAction(agentName: string, action: string, config: Bscs
   return { ok: false, output: `Unknown runtime: ${runtime}` };
 }
 
-async function handleMachinesList(config: BscsConfig): Promise<any[]> {
-  const machines: any[] = [];
+async function handleMachinesList(config: BscsConfig): Promise<Record<string, unknown>[]> {
+  const machines: Record<string, unknown>[] = [];
   const agents = config.agents || {};
-  const machinesConfig = (config.machines || {}) as Record<string, any>;
+  const machinesConfig = config.machines || {};
 
   for (const [ip, mc] of Object.entries(machinesConfig)) {
     if (!mc) continue;
-    const agentCount = Object.values(agents).filter((a: any) => a.machine === ip).length;
+    const agentCount = Object.values(agents).filter((a) => a.machine === ip).length;
     const agentNames = Object.entries(agents)
-      .filter(([, a]: [string, any]) => a.machine === ip)
-      .map(([name]: [string, any]) => name);
+      .filter(([, a]) => a.machine === ip)
+      .map(([name]) => name);
 
     let status = 'unknown';
     if (isLocalMachine(ip)) {
       status = 'online';
     } else {
-      const target = mc.sshAlias || `${mc.user || 'hani'}@${ip}`;
+      const target = mc.sshAlias || `${mc.user || userInfo().username}@${ip}`;
       const result = await executeCommand(`ssh -o ConnectTimeout=5 -o BatchMode=yes ${target} 'echo ok'`, 8000);
       status = result.ok ? 'online' : 'offline';
     }
@@ -238,7 +262,7 @@ async function handleMachinesList(config: BscsConfig): Promise<any[]> {
       status,
       agentCount,
       agents: agentNames,
-      user: mc.user || 'hani',
+      user: mc.user || userInfo().username,
     });
   }
 
@@ -249,12 +273,14 @@ async function handleMachinesList(config: BscsConfig): Promise<any[]> {
 // Server
 // ============================================================================
 
-export function startDashboardServer(port = 3200): Promise<DashboardServer> {
+export function startDashboardServer(port = 3200, bind = '127.0.0.1'): Promise<DashboardServer & { token: string }> {
+  const authToken = loadOrCreateAuthToken();
+
   return new Promise((resolve, reject) => {
-    logger.debug({ port }, 'Starting dashboard server');
+    logger.debug({ port, bind }, 'Starting dashboard server');
 
     // Fleet status cache — serve instantly, refresh in background
-    let fleetCache: any = null;
+    let fleetCache: unknown = null;
     let fleetCacheTime = 0;
     const CACHE_TTL = 15000; // 15 seconds
 
@@ -262,10 +288,10 @@ export function startDashboardServer(port = 3200): Promise<DashboardServer> {
       const config = loadConfig();
       const status = await getFleetStatus(true);
       for (const agent of status.agents) {
-        (agent as any).machineName = getMachineName(agent.machine, config);
+        (agent as unknown as Record<string, unknown>).machineName = getMachineName(agent.machine, config);
       }
       for (const [ip, m] of Object.entries(status.machines)) {
-        (m as any).name = getMachineName(ip, config);
+        (m as unknown as Record<string, unknown>).name = getMachineName(ip, config);
       }
       fleetCache = status;
       fleetCacheTime = Date.now();
@@ -278,25 +304,50 @@ export function startDashboardServer(port = 3200): Promise<DashboardServer> {
     const server = createServer(async (req, res) => {
       const url = req.url || '/';
       const method = req.method || 'GET';
-      
-      // CORS headers
-      res.setHeader('Access-Control-Allow-Origin', '*');
+
+      // CORS — only allow localhost and Tailscale (*.ts.net) origins
+      const origin = req.headers['origin'] as string | undefined;
+      const allowedOrigin = isAllowedOrigin(origin) ? origin! : '';
+      if (allowedOrigin) {
+        res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+        res.setHeader('Vary', 'Origin');
+      }
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-      
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
       if (method === 'OPTIONS') {
         res.writeHead(204);
         res.end();
         return;
       }
 
-// API routes
+      // API routes
       if (url.startsWith('/api/')) {
+        // Auth check — /api/auth is exempt (it IS the auth check endpoint)
+        if (url !== '/api/auth') {
+          const token = extractBearerToken(req.headers['authorization'] as string | undefined);
+          if (!token || !validateAuthToken(token, authToken)) {
+            jsonResponse(res, { error: 'Unauthorized' }, 401);
+            return;
+          }
+        }
+
         try {
+          // GET /api/auth — validate token (UI uses this on load)
+          if (url === '/api/auth' && method === 'GET') {
+            const token = extractBearerToken(req.headers['authorization'] as string | undefined);
+            if (token && validateAuthToken(token, authToken)) {
+              jsonResponse(res, { ok: true });
+            } else {
+              jsonResponse(res, { ok: false, error: 'Invalid token' }, 401);
+            }
+            return;
+          }
+
           // GET /api/fleet
           if (url === '/api/fleet' && method === 'GET') {
-            if (fleetCache && (Date.now() - fleetCacheTime) < CACHE_TTL) {
-              jsonResponse(res, fleetCache);
+            if (fleetCache !== null && (Date.now() - fleetCacheTime) < CACHE_TTL) {
+              jsonResponse(res, fleetCache as object);
               // Refresh in background if older than 5s
               if ((Date.now() - fleetCacheTime) > 5000) getFleetCached().catch(() => {});
             } else {
@@ -332,7 +383,7 @@ export function startDashboardServer(port = 3200): Promise<DashboardServer> {
           if (agentInfoMatch && method === 'GET') {
             const agentName = agentInfoMatch[1]!;
             const config = loadConfig();
-            const agent = (config.agents as any)?.[agentName];
+            const agent = config.agents?.[agentName];
             if (!agent) {
               jsonResponse(res, { ok: false, message: 'Agent not found' }, 404);
               return;
@@ -351,7 +402,7 @@ export function startDashboardServer(port = 3200): Promise<DashboardServer> {
           const agentActionMatch = url.match(/^\/api\/agent\/([a-z0-9-]+)\/(start|stop|restart|logs)$/);
           if (agentActionMatch) {
             const agentName = agentActionMatch[1]!;
-            const action = agentActionMatch[2]!;
+            const action = agentActionMatch[2]! as 'start' | 'stop' | 'restart' | 'logs';
             const config = loadConfig();
             
             if (method === 'POST' && ['start', 'stop', 'restart'].includes(action)) {
@@ -376,26 +427,26 @@ export function startDashboardServer(port = 3200): Promise<DashboardServer> {
           if (agentDeleteMatch && method === 'DELETE') {
             const agentName = agentDeleteMatch[1]!;
             const config = loadConfig();
-            const agent = (config.agents as any)?.[agentName];
-            
+            const agent = config.agents?.[agentName];
+
             if (!agent) {
               jsonResponse(res, { ok: false, message: 'Agent not found' }, 404);
               return;
             }
-            
+
             // Stop the agent first
             const runtime = agent.runtime || 'docker';
             const containerName = agent.container || `openclaw_${agentName}`;
-            
+
             if (runtime === 'docker') {
               await executeAgentCommand(agentName, `docker rm -f ${containerName}`, config);
             } else {
               await handleAgentAction(agentName, 'stop', config);
             }
-            
+
             // Remove from config
             if (config.agents) {
-              delete (config.agents as any)[agentName];
+              delete config.agents[agentName];
               saveConfig(config);
             }
             
@@ -414,7 +465,7 @@ export function startDashboardServer(port = 3200): Promise<DashboardServer> {
               return;
             }
             
-            const { name, role, machine, model, fallback, image, dryRun } = payload;
+            const { name, role, machine, model, image, dryRun } = payload;
             
             if (!name || !/^[a-z][a-z0-9-]{1,30}$/.test(name)) {
               jsonResponse(res, { ok: false, message: 'Invalid name: lowercase alphanumeric + hyphens, 2-31 chars' }, 400);
@@ -422,45 +473,45 @@ export function startDashboardServer(port = 3200): Promise<DashboardServer> {
             }
             
             const config = loadConfig();
-            if ((config.agents as any)?.[name]) {
+            if (config.agents?.[name]) {
               jsonResponse(res, { ok: false, message: `Agent "${name}" already exists` }, 409);
               return;
             }
-            
+
             // Find next available port pair
             const usedPorts = new Set<number>();
             for (const a of Object.values(config.agents || {})) {
-              if ((a as any).ports?.gateway) usedPorts.add((a as any).ports.gateway);
-              if ((a as any).ports?.remote) usedPorts.add((a as any).ports.remote);
+              if (a.ports?.gateway) usedPorts.add(a.ports.gateway);
+              if (a.ports?.remote) usedPorts.add(a.ports.remote);
             }
             let nextPort = config.defaults?.portRange?.start || 19000;
             while (usedPorts.has(nextPort) || usedPorts.has(nextPort + 1)) nextPort += 2;
-            
-            const agentConfig: any = {
+
+            const newAgentConfig: AgentConfig = {
               name,
               role: role || 'custom',
               machine: machine || 'localhost',
+              template: 'custom',
               runtime: 'docker',
               image: image || config.defaults?.image || 'openclaw-fleet:latest',
               model: model || undefined,
-              fallback: fallback || undefined,
               container: `openclaw_${name}`,
               ports: { gateway: nextPort, remote: nextPort + 1 },
               status: 'created',
               created: new Date().toISOString(),
             };
-            
+
             if (dryRun) {
-              jsonResponse(res, { ok: true, dryRun: true, agent: agentConfig });
+              jsonResponse(res, { ok: true, dryRun: true, agent: newAgentConfig });
               return;
             }
-            
+
             // Save to config
-            if (!config.agents) (config as any).agents = {};
-            (config.agents as any)[name] = agentConfig;
+            if (!config.agents) config.agents = {};
+            config.agents[name] = newAgentConfig;
             saveConfig(config);
             
-            jsonResponse(res, { ok: true, message: `Agent "${name}" created`, agent: agentConfig });
+            jsonResponse(res, { ok: true, message: `Agent "${name}" created`, agent: newAgentConfig });
             return;
           }
           
@@ -555,7 +606,7 @@ export function startDashboardServer(port = 3200): Promise<DashboardServer> {
       if (!existsSync(filePath)) {
         if (url === '/' || !url.includes('.')) {
           res.setHeader('Content-Type', 'text/html');
-          res.end(getEmbeddedHtml());
+          res.end(getEmbeddedHtml(authToken));
           return;
         }
         
@@ -601,10 +652,11 @@ export function startDashboardServer(port = 3200): Promise<DashboardServer> {
       }
     });
     
-    server.listen(port, '0.0.0.0', () => {
-      logger.info({ port }, 'Dashboard server started');
+    server.listen(port, bind, () => {
+      logger.info({ port, bind }, 'Dashboard server started');
       resolve({
         port,
+        token: authToken,
         close: () => {
           server.close();
           wsClients.clear();
@@ -647,23 +699,51 @@ function generateWebSocketAcceptKey(key: string): string {
     .digest('base64');
 }
 
+/**
+ * Build a RFC 6455 WebSocket text frame (server → client, unmasked).
+ * Handles all three payload length ranges per the spec:
+ *   0–125    : 1-byte length
+ *   126–65535: 2-byte (uint16) length (preceded by 0x7e)
+ *   65536+   : 8-byte (uint64) length (preceded by 0x7f)
+ */
+export function buildWsFrame(message: string): Buffer {
+  const payload = Buffer.from(message, 'utf8');
+  const len = payload.length;
+
+  let header: Buffer;
+  if (len <= 125) {
+    header = Buffer.from([0x81, len]);
+  } else if (len <= 65535) {
+    header = Buffer.allocUnsafe(4);
+    header[0] = 0x81;
+    header[1] = 0x7e;
+    header.writeUInt16BE(len, 2);
+  } else {
+    // For payloads >64 KiB we use the 8-byte length form.
+    // Node Buffers can't represent uint64 natively so we write the
+    // upper 4 bytes as 0 (payloads must be < 4 GiB, which is fine).
+    header = Buffer.allocUnsafe(10);
+    header[0] = 0x81;
+    header[1] = 0x7f;
+    header.writeUInt32BE(0, 2);       // high 32 bits
+    header.writeUInt32BE(len, 6);     // low 32 bits
+  }
+
+  return Buffer.concat([header, payload]);
+}
+
 export async function broadcastUpdate(): Promise<void> {
   if (wsClients.size === 0) return;
-  
+
   try {
     const config = loadConfig();
     const status = await getFleetStatus(true);
     for (const agent of status.agents) {
-      (agent as any).machineName = getMachineName(agent.machine, config);
+      (agent as unknown as Record<string, unknown>).machineName = getMachineName(agent.machine, config);
     }
     const message = JSON.stringify({ type: 'fleet-update', data: status });
-    
-    const payload = Buffer.from(message);
-    const frame = Buffer.concat([
-      Buffer.from([0x81, payload.length]),
-      payload,
-    ]);
-    
+    const frame = buildWsFrame(message);
+
     for (const client of wsClients) {
       try {
         client.write(frame);
@@ -680,12 +760,13 @@ export async function broadcastUpdate(): Promise<void> {
 // Embedded HTML Dashboard
 // ============================================================================
 
-function getEmbeddedHtml(): string {
+function getEmbeddedHtml(token: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="bscs-token" content="${token}">
   <title>BSCS Fleet Dashboard</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1208,17 +1289,26 @@ function getEmbeddedHtml(): string {
   </div>
 
 <script>
+// ===================== Auth Token =====================
+const _bscsToken = document.querySelector('meta[name="bscs-token"]')?.getAttribute('content') || '';
+
 // ===================== Safe Fetch Helper =====================
 async function safeFetchJson(url, options, retries = 2) {
   // Doctor endpoint can take longer due to SSH checks
   const isDoctor = url.includes('/api/doctor');
   const timeoutMs = isDoctor ? 30000 : 15000;
-  
+  // Inject auth header into every API request
+  const authHeaders = _bscsToken ? { 'Authorization': 'Bearer ' + _bscsToken } : {};
+  const mergedOptions = {
+    ...options,
+    headers: { ...(options && options.headers), ...authHeaders },
+  };
+
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
-      const res = await fetch(url, { ...options, signal: controller.signal });
+      const res = await fetch(url, { ...mergedOptions, signal: controller.signal });
       clearTimeout(timeout);
       const text = await res.text();
       if (!text) {
@@ -1990,18 +2080,24 @@ export function createDashboardCommand(): Command {
   const command = new Command('dashboard')
     .description('Start the BSCS web dashboard')
     .option('-p, --port <port>', 'Port to listen on', '3200')
+    .option('--bind <address>', 'Address to bind to (default: 127.0.0.1; use 0.0.0.0 for all interfaces)', '127.0.0.1')
     .option('--no-open', 'Do not open browser automatically')
-    .action(async (options: { port: string; open: boolean }) => {
+    .action(async (options: { port: string; bind: string; open: boolean }) => {
       const port = parseInt(options.port, 10);
-      
+      const bind = options.bind || '127.0.0.1';
+
       try {
-        const server = await startDashboardServer(port);
-        
+        const server = await startDashboardServer(port, bind);
+
         console.log();
         console.log(chalk.bold.cyan('📊 BSCS Dashboard'));
         console.log();
         console.log(chalk.dim('   URL:'), chalk.white(`http://localhost:${port}`));
         console.log(chalk.dim('   API:'), chalk.white(`http://localhost:${port}/api/fleet`));
+        console.log(chalk.dim('   Token:'), chalk.yellow(server.token));
+        console.log();
+        console.log(chalk.dim('   Bearer token required for all /api/ requests.'));
+        console.log(chalk.dim(`   Token stored at: ~/.config/bscs/dashboard-token`));
         console.log();
         console.log(chalk.dim('Press Ctrl+C to stop'));
         console.log();

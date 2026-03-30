@@ -1,11 +1,47 @@
-/**
- * Simple pino logger placeholder
- * Will be properly implemented with pino in later phase
- */
+import pino from 'pino';
 
-let logger: Logger | null = null;
+// Log level from env (LOG_LEVEL) or default to 'info'.
+// --verbose flag sets LOG_LEVEL=debug before calling createLogger.
+const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 
-interface Logger {
+// Redact op:// secret references from log output so API keys never appear in logs.
+const OP_REF_PATTERN = /op:\/\/[^\s"']+/g;
+
+function redactOpRefs(value: unknown): unknown {
+  if (typeof value === 'string') return value.replace(OP_REF_PATTERN, 'op://<redacted>');
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = redactOpRefs(v);
+    }
+    return out;
+  }
+  return value;
+}
+
+const rootLogger = pino({
+  level: LOG_LEVEL,
+  formatters: {
+    level(label) {
+      return { level: label };
+    },
+  },
+  serializers: {
+    // Redact op:// refs from any 'err' or nested objects logged at the root level.
+    err: pino.stdSerializers.err,
+  },
+  hooks: {
+    logMethod(inputArgs, method) {
+      // inputArgs is [mergingObject, msg?, ...args] or [msg, ...args]
+      if (inputArgs.length >= 1 && typeof inputArgs[0] === 'object' && inputArgs[0] !== null) {
+        inputArgs[0] = redactOpRefs(inputArgs[0]) as object;
+      }
+      return method.apply(this, inputArgs as Parameters<typeof method>);
+    },
+  },
+});
+
+export interface Logger {
   debug(obj: Record<string, unknown> | unknown, msg?: string): void;
   info(obj: Record<string, unknown> | unknown, msg?: string): void;
   warn(obj: Record<string, unknown> | unknown, msg?: string): void;
@@ -13,26 +49,9 @@ interface Logger {
 }
 
 export function getLogger(_level?: string): Logger {
-  if (!logger) {
-    logger = createConsoleLogger();
-  }
-  return logger;
+  return rootLogger;
 }
 
 export function createLogger(name: string): Logger {
-  return {
-    debug: (obj, msg) => console.debug(`[${name}] [DEBUG]`, typeof obj === 'object' ? JSON.stringify(obj) : obj, msg || ''),
-    info: (obj, msg) => console.info(`[${name}] [INFO]`, typeof obj === 'object' ? JSON.stringify(obj) : obj, msg || ''),
-    warn: (obj, msg) => console.warn(`[${name}] [WARN]`, typeof obj === 'object' ? JSON.stringify(obj) : obj, msg || ''),
-    error: (obj, msg) => console.error(`[${name}] [ERROR]`, typeof obj === 'object' ? JSON.stringify(obj) : obj, msg || ''),
-  };
-}
-
-function createConsoleLogger(): Logger {
-  return {
-    debug: (obj, msg) => console.debug('[DEBUG]', typeof obj === 'object' ? JSON.stringify(obj) : obj, msg || ''),
-    info: (obj, msg) => console.info('[INFO]', typeof obj === 'object' ? JSON.stringify(obj) : obj, msg || ''),
-    warn: (obj, msg) => console.warn('[WARN]', typeof obj === 'object' ? JSON.stringify(obj) : obj, msg || ''),
-    error: (obj, msg) => console.error('[ERROR]', typeof obj === 'object' ? JSON.stringify(obj) : obj, msg || ''),
-  };
+  return rootLogger.child({ module: name });
 }

@@ -11,7 +11,7 @@ import { createCostCommand } from './cost/index.js';
 import { createSecurityCommand } from './security/index.js';
 import { createMcpCommand } from './mcp/index.js';
 
-// Version is read from package.json during build and embedded here
+// Version is embedded at build time — do NOT replace with a runtime package.json read.
 const VERSION = '0.1.0';
 
 // ASCII art logo for --version

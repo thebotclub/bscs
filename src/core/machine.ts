@@ -146,7 +146,8 @@ export function getBootstrapSteps(machine: Machine): BootstrapStep[] {
   return [
     {
       name: 'docker',
-      command: 'curl -fsSL https://get.docker.com | sh',
+      // Use distro-signed package instead of curl-pipe-to-sh
+      command: 'apt-get update -qq && apt-get install -y docker.io && systemctl enable --now docker',
       description: 'Install Docker',
     },
     {
@@ -156,7 +157,8 @@ export function getBootstrapSteps(machine: Machine): BootstrapStep[] {
     },
     {
       name: 'node',
-      command: 'curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs',
+      // NodeSource signed .deb repository — no pipe-to-sh
+      command: 'apt-get update -qq && apt-get install -y ca-certificates curl gnupg && mkdir -p /etc/apt/keyrings && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list && apt-get update -qq && apt-get install -y nodejs',
       description: 'Install Node.js 22',
     },
     {

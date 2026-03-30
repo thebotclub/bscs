@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 
+// Version is embedded at build time — do NOT replace with a runtime package.json read.
 const VERSION = '0.1.0';
 
 const ASCII_LOGO = `

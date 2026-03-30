@@ -82,8 +82,7 @@ export function runSecurityAudit(config?: BscsConfig): AuditResult {
         for (const [, provider] of Object.entries(cfg.models.providers)) {
           if (
             provider.apiKey &&
-            !provider.apiKey.startsWith('op://') &&
-            provider.apiKey.length > 10
+            !provider.apiKey.startsWith('op://')
           ) {
             findings.push({
               severity: 'critical',
@@ -206,6 +205,6 @@ export function getSecurityBaseline(config?: BscsConfig): BaselineRecommendation
 function hasInlineKeys(cfg: BscsConfig): boolean {
   if (!cfg.models?.providers) return false;
   return Object.values(cfg.models.providers).some(
-    (p) => p.apiKey && !p.apiKey.startsWith('op://') && p.apiKey.length > 10,
+    (p) => p.apiKey !== undefined && !p.apiKey.startsWith('op://'),
   );
 }

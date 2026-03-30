@@ -103,7 +103,7 @@ function formatUptime(seconds: number): string {
 function sshExec(host: string, command: string, options: { user?: string; port?: number } = {}): { stdout: string; stderr: string; code: number } {
   const user = options.user || 'root';
   const port = options.port || 22;
-  const sshCmd = `ssh -p ${port} -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${user}@${host} "${command.replace(/"/g, '\\"')}"`;
+  const sshCmd = `ssh -p ${port} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 ${user}@${host} "${command.replace(/"/g, '\\"')}"`;
   
   try {
     const stdout = execSync(sshCmd, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
@@ -130,13 +130,15 @@ const BOOTSTRAP_STEPS: BootstrapStep[] = [
   {
     name: 'Docker',
     check: 'command -v docker >/dev/null 2>&1 && echo "installed"',
-    install: 'curl -fsSL https://get.docker.com | sh',
+    // Use distro-signed packages instead of curl-pipe-to-sh
+    install: 'apt-get update -qq && apt-get install -y docker.io && systemctl enable --now docker',
     verify: 'docker --version',
   },
   {
     name: 'Node.js',
     check: 'command -v node >/dev/null 2>&1 && echo "installed"',
-    install: 'curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs',
+    // NodeSource signed .deb repository — no pipe-to-sh
+    install: 'apt-get update -qq && apt-get install -y ca-certificates curl gnupg && mkdir -p /etc/apt/keyrings && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list && apt-get update -qq && apt-get install -y nodejs',
     verify: 'node --version',
   },
   {
@@ -295,7 +297,7 @@ function createMachineBootstrapCommand(): Command {
       // Step 4: Create OpenClaw config
       process.stdout.write(chalk.dim(`  Creating OpenClaw config... `));
       const configDir = '~/.config/openclaw';
-      const configCmd = `mkdir -p ${configDir} && echo '{"version":"1.0"}' > ${configDir}/config.json`;
+      const configCmd = `mkdir -p ${configDir} && printf '%s\\n' '{"version":"1.0"}' > ${configDir}/config.json`;
       const configResult = sshExec(host, configCmd, { user, port });
       
       if (configResult.code === 0) {
