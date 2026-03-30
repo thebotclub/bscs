@@ -167,6 +167,12 @@ function handleWebSocketUpgrade(req: any, socket: any, _head: Buffer) {
     wsClients.delete(socket);
   });
   
+  socket.on('error', (err: Error) => {
+    logger.debug({ err: err.message }, 'WebSocket client error');
+    wsClients.delete(socket);
+    try { socket.destroy(); } catch {}
+  });
+  
   // Send initial status
   broadcastUpdate();
 }
