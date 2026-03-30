@@ -305,7 +305,7 @@ export function startDashboardServer(port = 3200): Promise<DashboardServer> {
               return;
             }
             
-            const { name, role, machine, model, image, dryRun } = payload;
+            const { name, role, machine, model, fallback, image, dryRun } = payload;
             
             if (!name || !/^[a-z][a-z0-9-]{1,30}$/.test(name)) {
               jsonResponse(res, { ok: false, message: 'Invalid name: lowercase alphanumeric + hyphens, 2-31 chars' }, 400);
@@ -334,6 +334,7 @@ export function startDashboardServer(port = 3200): Promise<DashboardServer> {
               runtime: 'docker',
               image: image || config.defaults?.image || 'openclaw-fleet:latest',
               model: model || undefined,
+              fallback: fallback || undefined,
               container: `openclaw_${name}`,
               ports: { gateway: nextPort, remote: nextPort + 1 },
               status: 'created',
@@ -354,6 +355,83 @@ export function startDashboardServer(port = 3200): Promise<DashboardServer> {
             return;
           }
           
+          // GET /api/doctor
+          if (url === '/api/doctor' && method === 'GET') {
+            const config = loadConfig();
+            const checks: Array<{name: string; status: string; message: string; details?: string}> = [];
+
+            // 1. Check Docker daemon
+            try {
+              const dockerResult = await executeCommand('docker info --format "{{.ServerVersion}}"', 5000);
+              if (dockerResult.ok && dockerResult.output) {
+                checks.push({ name: 'Docker', status: 'ok', message: 'Docker running', details: `v${dockerResult.output.trim()}` });
+              } else {
+                checks.push({ name: 'Docker', status: 'error', message: 'Docker not running', details: dockerResult.output });
+              }
+            } catch {
+              checks.push({ name: 'Docker', status: 'error', message: 'Docker check failed' });
+            }
+
+            // 2. Check Node version
+            try {
+              const nodeResult = await executeCommand('node --version', 5000);
+              if (nodeResult.ok) {
+                checks.push({ name: 'Node.js', status: 'ok', message: nodeResult.output.trim() });
+              } else {
+                checks.push({ name: 'Node.js', status: 'error', message: 'Node.js not found' });
+              }
+            } catch {
+              checks.push({ name: 'Node.js', status: 'error', message: 'Node check failed' });
+            }
+
+            // 3. Check 1Password CLI
+            try {
+              const opResult = await executeCommand('op --version 2>/dev/null', 5000);
+              if (opResult.ok && opResult.output) {
+                checks.push({ name: '1Password CLI', status: 'ok', message: `v${opResult.output.trim()}` });
+              } else {
+                checks.push({ name: '1Password CLI', status: 'warn', message: 'Not installed' });
+              }
+            } catch {
+              checks.push({ name: '1Password CLI', status: 'warn', message: 'Not available' });
+            }
+
+            // 4. Check Tailscale
+            try {
+              const tsResult = await executeCommand('tailscale status --json 2>/dev/null | head -1', 5000);
+              if (tsResult.ok) {
+                checks.push({ name: 'Tailscale', status: 'ok', message: 'Connected' });
+              } else {
+                checks.push({ name: 'Tailscale', status: 'warn', message: 'Not connected' });
+              }
+            } catch {
+              checks.push({ name: 'Tailscale', status: 'warn', message: 'Not available' });
+            }
+
+            // 5. SSH connectivity to each machine in config
+            const machinesConfig = (config.machines || {}) as Record<string, any>;
+            for (const [ip, mc] of Object.entries(machinesConfig)) {
+              if (!mc) continue;
+              if (isLocalMachine(ip)) continue;
+              const name = mc.sshAlias || ip;
+              const target = mc.sshAlias || `${mc.user || 'hani'}@${ip}`;
+              try {
+                const sshResult = await executeCommand(`ssh -o ConnectTimeout=5 -o BatchMode=yes ${target} 'echo ok'`, 8000);
+                if (sshResult.ok) {
+                  checks.push({ name: `SSH to ${name}`, status: 'ok', message: 'Connected' });
+                } else {
+                  checks.push({ name: `SSH to ${name}`, status: 'error', message: 'Connection failed', details: sshResult.output });
+                }
+              } catch {
+                checks.push({ name: `SSH to ${name}`, status: 'error', message: 'SSH check failed' });
+              }
+            }
+
+            const okCount = checks.filter(c => c.status === 'ok').length;
+            jsonResponse(res, { checks, score: `${okCount}/${checks.length}` });
+            return;
+          }
+
           // Unknown API route
           jsonResponse(res, { error: 'Not found' }, 404);
           
@@ -803,6 +881,7 @@ function getEmbeddedHtml(): string {
         <input type="checkbox" id="auto-refresh" checked>
         <span class="toggle-slider"></span>
       </label>
+      <button class="btn btn-sm" onclick="runDoctor()" id="doctor-btn">🩺 Doctor</button>
       <button class="btn btn-sm" onclick="refreshData()" id="refresh-btn">↻ Refresh</button>
     </div>
   </div>
@@ -928,13 +1007,41 @@ function getEmbeddedHtml(): string {
             <select class="form-input" id="create-machine"></select>
           </div>
           <div class="form-group">
-            <label>Model (optional)</label>
-            <input type="text" class="form-input" id="create-model" placeholder="claude-opus-4-6">
+            <label>Model</label>
+            <select class="form-input" id="create-model-select" onchange="onModelSelectChange('create-model-select','create-model-custom')">
+              <option value="">— default —</option>
+              <option value="claude-opus-4-6">claude-opus-4-6</option>
+              <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+              <option value="claude-haiku-3.5">claude-haiku-3.5</option>
+              <option value="gpt-4o">gpt-4o</option>
+              <option value="gpt-4o-mini">gpt-4o-mini</option>
+              <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+              <option value="deepseek-v3">deepseek-v3</option>
+              <option value="__custom__">Custom…</option>
+            </select>
+            <input type="text" class="form-input" id="create-model-custom" placeholder="Enter custom model" style="display:none;margin-top:4px;">
           </div>
         </div>
-        <div class="form-group">
-          <label>Image (optional)</label>
-          <input type="text" class="form-input" id="create-image" placeholder="openclaw-fleet:latest">
+        <div class="form-row">
+          <div class="form-group">
+            <label>Fallback Model (optional)</label>
+            <select class="form-input" id="create-fallback-select" onchange="onModelSelectChange('create-fallback-select','create-fallback-custom')">
+              <option value="">— none —</option>
+              <option value="claude-opus-4-6">claude-opus-4-6</option>
+              <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+              <option value="claude-haiku-3.5">claude-haiku-3.5</option>
+              <option value="gpt-4o">gpt-4o</option>
+              <option value="gpt-4o-mini">gpt-4o-mini</option>
+              <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+              <option value="deepseek-v3">deepseek-v3</option>
+              <option value="__custom__">Custom…</option>
+            </select>
+            <input type="text" class="form-input" id="create-fallback-custom" placeholder="Enter custom model" style="display:none;margin-top:4px;">
+          </div>
+          <div class="form-group">
+            <label>Image (optional)</label>
+            <input type="text" class="form-input" id="create-image" placeholder="openclaw-fleet:latest">
+          </div>
         </div>
         <div id="create-preview" class="dry-run-preview" style="display:none;"></div>
         <div class="form-actions">
@@ -958,7 +1065,33 @@ function getEmbeddedHtml(): string {
     </div>
   </div>
 
+  <!-- Doctor Modal -->
+  <div class="modal-overlay" id="doctor-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>🩺 Fleet Doctor</h2>
+        <button class="modal-close" onclick="closeModal('doctor-modal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="doctor-content" style="text-align:center;padding:2rem;color:var(--text-dim);">
+          <span class="spinner"></span> Running checks…
+        </div>
+        <div id="doctor-score" style="text-align:center;margin-top:1rem;font-size:1.2rem;font-weight:700;display:none;"></div>
+      </div>
+    </div>
+  </div>
+
 <script>
+// ===================== Safe Fetch Helper =====================
+async function safeFetchJson(url, options) {
+  const res = await fetch(url, options);
+  const text = await res.text();
+  if (!text) throw new Error('Empty response from server');
+  const data = JSON.parse(text);
+  if (!res.ok && !data.ok && !data.message) throw new Error('HTTP ' + res.status);
+  return data;
+}
+
 // ===================== State =====================
 let fleetData = null;
 let machinesData = null;
@@ -972,21 +1105,17 @@ let busyAgents = new Set();
 // ===================== Data Fetching =====================
 async function fetchFleet() {
   try {
-    const res = await fetch('/api/fleet');
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    fleetData = await res.json();
+    fleetData = await safeFetchJson('/api/fleet');
     renderAll();
   } catch (err) {
     console.error('Fleet fetch error:', err);
-    showToast('Failed to load fleet data', 'error');
+    showToast('Failed to load fleet data: ' + err.message, 'error');
   }
 }
 
 async function fetchMachines() {
   try {
-    const res = await fetch('/api/machines');
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
+    const data = await safeFetchJson('/api/machines');
     machinesData = data.machines || [];
     renderMachines();
   } catch (err) {
@@ -1185,8 +1314,7 @@ async function agentAction(name, action) {
   renderAgents();
 
   try {
-    const res = await fetch('/api/agent/' + name + '/' + action, { method: 'POST' });
-    const data = await res.json();
+    const data = await safeFetchJson('/api/agent/' + name + '/' + action, { method: 'POST' });
     if (data.ok) {
       showToast(name + ' ' + action + 'ed', 'success');
     } else {
@@ -1206,8 +1334,7 @@ async function deleteAgent(name) {
   renderAgents();
 
   try {
-    const res = await fetch('/api/agent/' + name, { method: 'DELETE' });
-    const data = await res.json();
+    const data = await safeFetchJson('/api/agent/' + name, { method: 'DELETE' });
     if (data.ok) {
       showToast(name + ' deleted', 'success');
     } else {
@@ -1227,8 +1354,7 @@ async function showLogs(name) {
   openModal('logs-modal');
 
   try {
-    const res = await fetch('/api/agent/' + name + '/logs');
-    const data = await res.json();
+    const data = await safeFetchJson('/api/agent/' + name + '/logs');
     document.getElementById('logs-content').textContent = data.logs || 'No logs available';
   } catch (err) {
     document.getElementById('logs-content').textContent = 'Error: ' + err.message;
@@ -1239,10 +1365,33 @@ async function showLogs(name) {
 function openCreateModal() {
   document.getElementById('create-name').value = '';
   document.getElementById('create-role').value = 'custom';
-  document.getElementById('create-model').value = '';
+  document.getElementById('create-model-select').value = '';
+  document.getElementById('create-model-custom').value = '';
+  document.getElementById('create-model-custom').style.display = 'none';
+  document.getElementById('create-fallback-select').value = '';
+  document.getElementById('create-fallback-custom').value = '';
+  document.getElementById('create-fallback-custom').style.display = 'none';
   document.getElementById('create-image').value = '';
   document.getElementById('create-preview').style.display = 'none';
   openModal('create-modal');
+}
+
+function onModelSelectChange(selectId, customId) {
+  const sel = document.getElementById(selectId);
+  const custom = document.getElementById(customId);
+  if (sel.value === '__custom__') {
+    custom.style.display = 'block';
+    custom.focus();
+  } else {
+    custom.style.display = 'none';
+    custom.value = '';
+  }
+}
+
+function getModelValue(selectId, customId) {
+  const sel = document.getElementById(selectId).value;
+  if (sel === '__custom__') return document.getElementById(customId).value.trim() || undefined;
+  return sel || undefined;
 }
 
 async function dryRunCreate() {
@@ -1251,8 +1400,7 @@ async function dryRunCreate() {
   payload.dryRun = true;
 
   try {
-    const res = await fetch('/api/agent', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-    const data = await res.json();
+    const data = await safeFetchJson('/api/agent', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
     const preview = document.getElementById('create-preview');
     if (data.ok) {
       preview.textContent = JSON.stringify(data.agent, null, 2);
@@ -1275,8 +1423,7 @@ async function submitCreate() {
   btn.textContent = 'Creating…';
 
   try {
-    const res = await fetch('/api/agent', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-    const data = await res.json();
+    const data = await safeFetchJson('/api/agent', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
     if (data.ok) {
       showToast('Agent "' + payload.name + '" created', 'success');
       closeModal('create-modal');
@@ -1300,7 +1447,8 @@ function getCreatePayload() {
     name,
     role: document.getElementById('create-role').value,
     machine: document.getElementById('create-machine').value,
-    model: document.getElementById('create-model').value || undefined,
+    model: getModelValue('create-model-select', 'create-model-custom'),
+    fallback: getModelValue('create-fallback-select', 'create-fallback-custom'),
     image: document.getElementById('create-image').value || undefined,
   };
 }
@@ -1423,6 +1571,38 @@ document.getElementById('auto-refresh').addEventListener('change', e => {
   if (autoRefreshEnabled && !pollTimer) startPolling();
   if (!autoRefreshEnabled && pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 });
+
+// ===================== Doctor =====================
+async function runDoctor() {
+  document.getElementById('doctor-content').innerHTML = '<span class="spinner"></span> Running checks…';
+  document.getElementById('doctor-score').style.display = 'none';
+  openModal('doctor-modal');
+
+  try {
+    const data = await safeFetchJson('/api/doctor');
+    const checks = data.checks || [];
+    const html = '<table style="width:100%;border-collapse:collapse;">' +
+      '<thead><tr><th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Check</th>' +
+      '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Status</th>' +
+      '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Details</th></tr></thead>' +
+      '<tbody>' + checks.map(function(c) {
+        var icon = c.status === 'ok' ? '✅' : c.status === 'warn' ? '⚠️' : '❌';
+        var color = c.status === 'ok' ? 'var(--green)' : c.status === 'warn' ? 'var(--yellow)' : 'var(--red)';
+        return '<tr>' +
+          '<td style="padding:6px 8px;border-bottom:1px solid var(--border);">' + esc(c.name) + '</td>' +
+          '<td style="padding:6px 8px;border-bottom:1px solid var(--border);color:' + color + ';">' + icon + ' ' + esc(c.status) + '</td>' +
+          '<td style="padding:6px 8px;border-bottom:1px solid var(--border);color:var(--text-dim);font-size:0.8rem;">' + esc(c.message || '') + (c.details ? ' (' + esc(c.details) + ')' : '') + '</td>' +
+        '</tr>';
+      }).join('') + '</tbody></table>';
+    document.getElementById('doctor-content').innerHTML = html;
+    var scoreEl = document.getElementById('doctor-score');
+    scoreEl.textContent = 'Score: ' + (data.score || '?');
+    scoreEl.style.color = checks.every(function(c) { return c.status === 'ok'; }) ? 'var(--green)' : 'var(--yellow)';
+    scoreEl.style.display = 'block';
+  } catch (err) {
+    document.getElementById('doctor-content').innerHTML = '<div style="color:var(--red);text-align:center;">❌ Doctor failed: ' + esc(err.message) + '</div>';
+  }
+}
 
 // ===================== Init =====================
 fetchFleet();
