@@ -129,8 +129,8 @@ export const AgentConfigSchema = z.object({
   configPath: z.string().optional(),
   ports: z
     .object({
-      gateway: z.number().int().min(1).max(65535).optional(),
-      remote: z.number().int().min(1).max(65535).optional(),
+      gateway: z.number().int().min(0).max(65535).optional(),
+      remote: z.number().int().min(0).max(65535).optional(),
     })
     .optional(),
   created: z.string().optional(),
