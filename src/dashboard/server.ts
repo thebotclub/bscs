@@ -182,6 +182,28 @@ async function handleMachinesList(config: BscsConfig): Promise<any[]> {
 export function startDashboardServer(port = 3200): Promise<DashboardServer> {
   return new Promise((resolve, reject) => {
     logger.debug({ port }, 'Starting dashboard server');
+
+    // Fleet status cache — serve instantly, refresh in background
+    let fleetCache: any = null;
+    let fleetCacheTime = 0;
+    const CACHE_TTL = 15000; // 15 seconds
+
+    async function getFleetCached() {
+      const config = loadConfig();
+      const status = await getFleetStatus(true);
+      for (const agent of status.agents) {
+        (agent as any).machineName = getMachineName(agent.machine, config);
+      }
+      for (const [ip, m] of Object.entries(status.machines)) {
+        (m as any).name = getMachineName(ip, config);
+      }
+      fleetCache = status;
+      fleetCacheTime = Date.now();
+      return status;
+    }
+
+    // Pre-warm cache on startup
+    getFleetCached().catch(() => {});
     
     const server = createServer(async (req, res) => {
       const url = req.url || '/';
@@ -197,23 +219,20 @@ export function startDashboardServer(port = 3200): Promise<DashboardServer> {
         res.end();
         return;
       }
-      
-      // API routes
+
+// API routes
       if (url.startsWith('/api/')) {
         try {
           // GET /api/fleet
           if (url === '/api/fleet' && method === 'GET') {
-            const config = loadConfig();
-            const status = await getFleetStatus(true);
-            // Enrich agents with machine names
-            for (const agent of status.agents) {
-              (agent as any).machineName = getMachineName(agent.machine, config);
+            if (fleetCache && (Date.now() - fleetCacheTime) < CACHE_TTL) {
+              jsonResponse(res, fleetCache);
+              // Refresh in background if older than 5s
+              if ((Date.now() - fleetCacheTime) > 5000) getFleetCached().catch(() => {});
+            } else {
+              const status = await getFleetCached();
+              jsonResponse(res, status);
             }
-            // Enrich machines with names
-            for (const [ip, m] of Object.entries(status.machines)) {
-              (m as any).name = getMachineName(ip, config);
-            }
-            jsonResponse(res, status);
             return;
           }
           
