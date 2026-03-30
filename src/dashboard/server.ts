@@ -79,13 +79,16 @@ async function executeAgentCommand(agentName: string, command: string, config: B
   }
 }
 
+const DOCKER_PATH_PREFIX = 'export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH" && ';
+
 function getDockerCommand(action: string, containerName: string): string {
+  const prefix = DOCKER_PATH_PREFIX;
   switch (action) {
-    case 'start': return `docker start ${containerName}`;
-    case 'stop': return `docker stop ${containerName}`;
-    case 'restart': return `docker restart ${containerName}`;
-    case 'remove': return `docker rm -f ${containerName}`;
-    case 'logs': return `docker logs --tail 100 ${containerName}`;
+    case 'start': return `${prefix}docker start ${containerName}`;
+    case 'stop': return `${prefix}docker stop ${containerName}`;
+    case 'restart': return `${prefix}docker restart ${containerName}`;
+    case 'remove': return `${prefix}docker rm -f ${containerName}`;
+    case 'logs': return `${prefix}docker logs --tail 100 ${containerName}`;
     default: throw new Error(`Unknown action: ${action}`);
   }
 }
