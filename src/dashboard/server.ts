@@ -14,6 +14,12 @@ import { Command } from 'commander';
 import { createHash } from 'crypto';
 import { loadOrCreateAuthToken, validateAuthToken, extractBearerToken } from '../core/auth.js';
 
+function extractCookieToken(cookieHeader: string | undefined): string | null {
+  if (!cookieHeader) return null;
+  const match = cookieHeader.match(/bscs_session=([^;]+)/);
+  return match ? match[1] : null;
+}
+
 
 const logger = createLogger('dashboard');
 
@@ -325,7 +331,9 @@ export function startDashboardServer(port = 3200, bind = '127.0.0.1'): Promise<D
       if (url.startsWith('/api/')) {
         // Auth check — /api/auth is exempt (it IS the auth check endpoint)
         if (url !== '/api/auth') {
-          const token = extractBearerToken(req.headers['authorization'] as string | undefined);
+          const bearerToken = extractBearerToken(req.headers['authorization'] as string | undefined);
+          const cookieToken = extractCookieToken(req.headers['cookie'] as string | undefined);
+          const token = bearerToken || cookieToken;
           if (!token || !validateAuthToken(token, authToken)) {
             jsonResponse(res, { error: 'Unauthorized' }, 401);
             return;
@@ -333,6 +341,23 @@ export function startDashboardServer(port = 3200, bind = '127.0.0.1'): Promise<D
         }
 
         try {
+          // POST /api/auth — exchange token for cookie session
+          if (url === '/api/auth' && method === 'POST') {
+            const body = await readBody(req);
+            try {
+              const { token } = JSON.parse(body);
+              if (token && validateAuthToken(token, authToken)) {
+                res.setHeader('Set-Cookie', `bscs_session=${authToken}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400`);
+                jsonResponse(res, { ok: true });
+              } else {
+                jsonResponse(res, { ok: false, message: 'Invalid token' }, 401);
+              }
+            } catch {
+              jsonResponse(res, { ok: false, message: 'Invalid request body' }, 400);
+            }
+            return;
+          }
+
           // GET /api/auth — validate token (UI uses this on load)
           if (url === '/api/auth' && method === 'GET') {
             const token = extractBearerToken(req.headers['authorization'] as string | undefined);
