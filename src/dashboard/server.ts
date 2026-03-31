@@ -17,7 +17,7 @@ import { loadOrCreateAuthToken, validateAuthToken, extractBearerToken } from '..
 function extractCookieToken(cookieHeader: string | undefined): string | null {
   if (!cookieHeader) return null;
   const match = cookieHeader.match(/bscs_session=([^;]+)/);
-  return match ? match[1] : null;
+  return match?.[1] ?? null;
 }
 
 
