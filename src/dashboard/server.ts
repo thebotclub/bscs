@@ -760,7 +760,38 @@ export async function broadcastUpdate(): Promise<void> {
 // Embedded HTML Dashboard
 // ============================================================================
 
+function getNewUiHtml(): string | null {
+  try {
+    const __dirname = dirname(fileURLToPath(import.meta.url));
+    // Bundle is placed at dist/dashboard/bundle.js by build:ui
+    // When compiled, server.ts is at dist/src/dashboard/server.js
+    // so we look two levels up then into dashboard/
+    const bundlePath = join(__dirname, '..', '..', '..', 'dist', 'dashboard', 'bundle.js');
+    const cssPath = join(__dirname, '..', '..', '..', 'dist', 'dashboard', 'styles.css');
+    if (!existsSync(bundlePath)) return null;
+    const bundle = readFileSync(bundlePath, 'utf8');
+    const css = existsSync(cssPath) ? readFileSync(cssPath, 'utf8') : '';
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BSCS Fleet Dashboard</title>
+  <style>${css}</style>
+</head>
+<body>
+  <div id="app"></div>
+  <script>${bundle}</script>
+</body>
+</html>`;
+  } catch {
+    return null;
+  }
+}
+
 function getEmbeddedHtml(token: string): string {
+  const newUi = getNewUiHtml();
+  if (newUi !== null) return newUi;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>

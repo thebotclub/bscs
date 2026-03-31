@@ -1,0 +1,100 @@
+/**
+ * Agent route handlers: list, get, actions (start/stop/restart), logs.
+ */
+import type { IncomingMessage, ServerResponse } from 'http';
+import type { BscsConfig } from '../../util/types.js';
+import {
+  getAllAgentStatuses,
+  getAgentStatus,
+  startAgent,
+  stopAgent,
+  restartAgent,
+} from '../../core/agent.js';
+import { jsonResponse, jsonError } from '../middleware/errors.js';
+
+const ALLOWED_ACTIONS = new Set(['start', 'stop', 'restart']);
+
+/**
+ * GET /api/agents — list all agents with their statuses.
+ */
+export async function handleListAgents(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  _config: BscsConfig,
+): Promise<void> {
+  try {
+    const agents = await getAllAgentStatuses();
+    jsonResponse(res, agents);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to list agents';
+    jsonError(res, message, 500);
+  }
+}
+
+/**
+ * GET /api/agents/:name — get a single agent's status/details.
+ */
+export async function handleGetAgent(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  agentName: string,
+  _config: BscsConfig,
+): Promise<void> {
+  try {
+    const agent = await getAgentStatus(agentName);
+    jsonResponse(res, agent);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Agent not found';
+    jsonError(res, message, 404);
+  }
+}
+
+/**
+ * POST /api/agents/:name/(start|stop|restart) — perform an action on an agent.
+ */
+export async function handleAgentAction(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  agentName: string,
+  action: string,
+  _config: BscsConfig,
+): Promise<void> {
+  if (!ALLOWED_ACTIONS.has(action)) {
+    jsonError(res, `Unknown action: ${action}. Allowed: start, stop, restart`, 400);
+    return;
+  }
+
+  try {
+    let result: { name: string; status: string };
+    if (action === 'start') {
+      result = await startAgent(agentName);
+    } else if (action === 'stop') {
+      result = await stopAgent(agentName);
+    } else {
+      result = await restartAgent(agentName);
+    }
+    jsonResponse(res, { ok: true, ...result });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : `Failed to ${action} agent`;
+    jsonError(res, message, 500);
+  }
+}
+
+/**
+ * GET /api/agents/:name/logs — return recent log lines for an agent.
+ */
+export async function handleAgentLogs(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  agentName: string,
+  config: BscsConfig,
+): Promise<void> {
+  if (!config.agents?.[agentName]) {
+    jsonError(res, `Agent "${agentName}" not found`, 404);
+    return;
+  }
+
+  // Return a simple JSON response indicating logs are available.
+  // Full streaming log support would use SSE; this is the basic REST variant.
+  jsonResponse(res, { agent: agentName, message: 'Use SSE endpoint for streaming logs' });
+}
