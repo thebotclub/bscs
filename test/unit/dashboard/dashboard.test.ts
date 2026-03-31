@@ -92,8 +92,13 @@ describe('Auth: extractBearerToken', () => {
 // ── WebSocket frame builder ───────────────────────────────────────────
 
 describe('buildWsFrame', () => {
-  it('encodes short payload (≤125 bytes) with 2-byte header', async () => {
-    const { buildWsFrame } = await import('../../../src/dashboard/server.js');
+  let buildWsFrame: typeof import('../../../src/dashboard/server.js').buildWsFrame;
+
+  beforeAll(async () => {
+    ({ buildWsFrame } = await import('../../../src/dashboard/server.js'));
+  });
+
+  it('encodes short payload (≤125 bytes) with 2-byte header', () => {
     const msg = 'hello';
     const frame = buildWsFrame(msg);
     // Byte 0: 0x81 (FIN + text opcode)
@@ -103,8 +108,7 @@ describe('buildWsFrame', () => {
     expect(frame.length).toBe(2 + 5);
   });
 
-  it('encodes medium payload (126–65535 bytes) with 4-byte header and 16-bit length', async () => {
-    const { buildWsFrame } = await import('../../../src/dashboard/server.js');
+  it('encodes medium payload (126–65535 bytes) with 4-byte header and 16-bit length', () => {
     const msg = 'x'.repeat(200);
     const frame = buildWsFrame(msg);
     expect(frame[0]).toBe(0x81);
@@ -114,8 +118,7 @@ describe('buildWsFrame', () => {
     expect(frame.length).toBe(4 + 200);
   });
 
-  it('encodes large payload (>65535 bytes) with 10-byte header and 64-bit length', async () => {
-    const { buildWsFrame } = await import('../../../src/dashboard/server.js');
+  it('encodes large payload (>65535 bytes) with 10-byte header and 64-bit length', () => {
     const msg = 'x'.repeat(70000);
     const frame = buildWsFrame(msg);
     expect(frame[0]).toBe(0x81);
@@ -127,16 +130,14 @@ describe('buildWsFrame', () => {
     expect(frame.length).toBe(10 + 70000);
   });
 
-  it('correctly encodes a 125-byte payload (boundary)', async () => {
-    const { buildWsFrame } = await import('../../../src/dashboard/server.js');
+  it('correctly encodes a 125-byte payload (boundary)', () => {
     const msg = 'y'.repeat(125);
     const frame = buildWsFrame(msg);
     expect(frame[1]).toBe(125);
     expect(frame.length).toBe(2 + 125);
   });
 
-  it('correctly encodes a 126-byte payload (first extended case)', async () => {
-    const { buildWsFrame } = await import('../../../src/dashboard/server.js');
+  it('correctly encodes a 126-byte payload (first extended case)', () => {
     const msg = 'y'.repeat(126);
     const frame = buildWsFrame(msg);
     expect(frame[1]).toBe(0x7e);

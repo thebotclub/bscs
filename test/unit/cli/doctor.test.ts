@@ -72,8 +72,13 @@ describe('fixDoctorIssue', () => {
 // ── Bootstrap: getBootstrapSteps ─────────────────────────────────────
 
 describe('getBootstrapSteps', () => {
-  it('docker step does not use curl-pipe-to-sh', async () => {
-    const { getBootstrapSteps } = await import('../../../src/core/machine.js');
+  let getBootstrapSteps: typeof import('../../../src/core/machine.js').getBootstrapSteps;
+
+  beforeAll(async () => {
+    ({ getBootstrapSteps } = await import('../../../src/core/machine.js'));
+  });
+
+  it('docker step does not use curl-pipe-to-sh', () => {
     const steps = getBootstrapSteps({
       host: 'example.com',
       user: 'ubuntu',
@@ -88,8 +93,7 @@ describe('getBootstrapSteps', () => {
     expect(docker!.command).toMatch(/docker/i);
   });
 
-  it('node step does not use curl-pipe-to-sh', async () => {
-    const { getBootstrapSteps } = await import('../../../src/core/machine.js');
+  it('node step does not use curl-pipe-to-sh', () => {
     const steps = getBootstrapSteps({
       host: 'example.com',
       user: 'ubuntu',
@@ -104,8 +108,7 @@ describe('getBootstrapSteps', () => {
     expect(node!.command).toMatch(/nodejs/i);
   });
 
-  it('includes docker-group step with correct user', async () => {
-    const { getBootstrapSteps } = await import('../../../src/core/machine.js');
+  it('includes docker-group step with correct user', () => {
     const steps = getBootstrapSteps({
       host: 'example.com',
       user: 'myuser',
@@ -117,8 +120,7 @@ describe('getBootstrapSteps', () => {
     expect(group!.command).toContain('myuser');
   });
 
-  it('returns all required step names', async () => {
-    const { getBootstrapSteps } = await import('../../../src/core/machine.js');
+  it('returns all required step names', () => {
     const steps = getBootstrapSteps({ host: 'h', user: 'u', role: 'worker', port: 22 });
     const names = steps.map((s) => s.name);
     expect(names).toContain('docker');

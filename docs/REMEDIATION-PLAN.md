@@ -24,7 +24,7 @@
 Replace all shell-interpolated command execution with argument-array variants that bypass shell interpretation entirely.
 
 | File | Line(s) | Current Pattern | Fix |
-|------|---------|----------------|-----|
+| ------ | --------- | ---------------- | ----- |
 | `src/core/secrets.ts` | 42 | `execSync(\`op read "${ref}"\`)` | `execFileSync('op', ['read', ref])` |
 | `src/core/agent.ts` | 106 | `execSync(\`${pipCmd} install tribunal\`)` | `execFileSync(pipCmd, ['install', 'tribunal'])` |
 | `src/core/agent.ts` | 95-97 | `execSync('command -v pipx')` | `execFileSync('command', ['-v', 'pipx'])` — or use `which` via `execFileSync` |
@@ -33,6 +33,7 @@ Replace all shell-interpolated command execution with argument-array variants th
 | `src/dashboard/server.ts` | 2167-2171 | `execSync(\`open ${url}\`)` | `execFileSync('open', [url])` |
 
 **Tests to add/update:**
+
 - Unit test that `resolveSecret` with a malicious `op://` ref containing shell metacharacters does NOT execute them.
 - Unit test that `bootstrapMachine` passes commands as SSH args, not shell strings.
 
@@ -40,7 +41,7 @@ Replace all shell-interpolated command execution with argument-array variants th
 
 The codebase constructs SSH commands in 4+ places with raw string interpolation. Create a single safe builder:
 
-```
+```text
 src/util/ssh.ts
 ```
 
@@ -105,6 +106,7 @@ export function validateUsername(user: string): string {
 Apply at Zod schema level in `types.ts` using `.regex()` refinements so invalid values are rejected at config load time, not at command execution time.
 
 **Phase 1 Definition of Done:**
+
 - Zero `execSync` calls with template literal interpolation of user/config values
 - All SSH execution goes through `sshExec()`
 - Tests prove shell metacharacters are not interpreted
@@ -180,6 +182,7 @@ res.setHeader('Content-Security-Policy', "default-src 'self'");
 ```
 
 **Phase 2 Definition of Done:**
+
 - POST endpoints reject bodies > 64KB with 413
 - Auth endpoint rate-limited to 10 attempts/minute per IP
 - Security headers on all responses
@@ -195,7 +198,7 @@ res.setHeader('Content-Security-Policy', "default-src 'self'");
 
 Move these functions out of `fleet.ts`, `doctor.ts`, and `dashboard/server.ts`:
 
-```
+```text
 getLocalIps(): string[]
 isLocalMachine(host: string): boolean
 getSshTarget(host: string, config: BscsConfig): string
@@ -206,6 +209,7 @@ Single source, single test file (`test/unit/util/network.test.ts`).
 ### 3B: Extract `src/util/format.ts`
 
 Move shared formatting:
+
 - `formatUptime(seconds)` — duplicated in `doctor.ts` and `dashboard/server.ts`
 - `esc()` HTML escaper — used in dashboard server's inline JS
 
@@ -214,6 +218,7 @@ Move shared formatting:
 `readBody` exists in both `src/api/auth.ts` and `src/dashboard/server.ts`. After Phase 2A creates `src/api/middleware/body.ts`, update all callers to use it.
 
 **Phase 3 Definition of Done:**
+
 - `grep -r "function getLocalIps" src/` returns exactly 1 result
 - `grep -r "function isLocalMachine" src/` returns exactly 1 result
 - `grep -r "function readBody" src/` returns exactly 1 result
@@ -234,7 +239,7 @@ The new `src/api/server.ts` already handles all the API routes the dashboard nee
 Audit every route in `dashboard/server.ts` and confirm `src/api/` has an equivalent:
 
 | Dashboard Route | API Equivalent | Gap? |
-|----------------|----------------|------|
+| ---------------- | ---------------- | ------ |
 | `GET /api/fleet` | `GET /api/fleet` (fleet.ts) | None |
 | `GET /api/agents` | `GET /api/agents` (agents.ts) | None |
 | `POST /api/agent` (create) | Missing | **Add** `POST /api/agents` |
@@ -275,10 +280,12 @@ Change `createDashboardCommand()` to import and call `startApiServer()` from `sr
 ### 4E: Deprecate and Remove Old Dashboard Server
 
 Once parity is confirmed and the CLI command is rewired:
+
 1. Mark `src/dashboard/server.ts` as deprecated (one release cycle)
 2. Delete it in the next release
 
 **Phase 4 Definition of Done:**
+
 - `bscs dashboard` starts the API server and serves the Preact UI
 - All dashboard functionality works through `src/api/` routes
 - `src/dashboard/server.ts` is deleted or clearly marked deprecated
@@ -321,6 +328,7 @@ ENTRYPOINT ["node", "dist/bin/bscs.js"]
 ```
 
 Key improvements:
+
 - Multi-stage (smaller image, no dev deps or source in production)
 - Non-root user
 - `--omit=dev` instead of deprecated `--only=production`
@@ -360,12 +368,13 @@ logger.info({ output: result }, 'Tribunal installed');
 
 The config files exist but `test/integration/` and `test/e2e/` directories don't. Create skeleton directories with a README explaining what goes where:
 
-```
+```text
 test/integration/   — Tests that hit real Docker (skipped in CI without Docker)
 test/e2e/           — Full CLI invocation tests (bscs doctor, bscs agent create --dry-run)
 ```
 
 **Phase 5 Definition of Done:**
+
 - `echo` file gone
 - `docker build .` produces a working, minimal image
 - `npm run typecheck` covers UI code too
@@ -407,7 +416,7 @@ async function withErrorHandler(fn: () => Promise<void>): Promise<void> {
 
 When Docker is not running, several commands fail with cryptic `ECONNREFUSED` or dockerode errors. Detect early and show:
 
-```
+```text
 Docker is not running.
 
   macOS: open -a Docker
@@ -420,7 +429,7 @@ Then retry: bscs agent create my-coder --role coding
 
 When `allocatePorts` exhausts the range, the current error is generic. Improve to:
 
-```
+```text
 No available ports in range 19000-19999.
 
 You have 500 agents configured. Consider:
@@ -429,6 +438,7 @@ You have 500 agents configured. Consider:
 ```
 
 **Phase 6 Definition of Done:**
+
 - No raw stack traces shown to users in normal operation
 - Docker-not-running detected and explained before any Docker command
 - All resource-exhaustion errors include actionable next steps
@@ -437,7 +447,7 @@ You have 500 agents configured. Consider:
 
 ## Execution Order & Dependencies
 
-```
+```text
 Phase 1 (Security)     ← CRITICAL, no dependencies, do first
   │
 Phase 2 (API Hardening) ← Builds on Phase 1's patterns
@@ -452,6 +462,7 @@ Phase 6 (Error UX)      ← Can start after Phase 1, improves throughout
 ```
 
 **Recommended parallel tracks:**
+
 - **Track A (security):** Phase 1 → Phase 2 → Phase 4
 - **Track B (quality):** Phase 3 → Phase 5 → Phase 6
 
