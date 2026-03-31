@@ -97,4 +97,9 @@ export function getConfigPathString(): string {
   return getConfigPath();
 }
 
+export function getAgentConfigPath(name: string): string {
+  const base = process.env.BSCS_CONFIG_DIR || `${homedir()}/.config/bscs`;
+  return `${base}/agents/${name}/openclaw.json`;
+}
+
 export { DEFAULT_CONFIG };

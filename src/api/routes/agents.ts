@@ -14,6 +14,8 @@ import {
 } from '../../core/agent.js';
 import { jsonResponse, jsonError } from '../middleware/errors.js';
 import { readBody } from '../middleware/body.js';
+import { getAgentConfigPath } from '../../core/config.js';
+import { readFile } from 'node:fs/promises';
 
 const ALLOWED_ACTIONS = new Set(['start', 'stop', 'restart']);
 
@@ -100,6 +102,34 @@ export async function handleAgentLogs(
   // Return a simple JSON response indicating logs are available.
   // Full streaming log support would use SSE; this is the basic REST variant.
   jsonResponse(res, { agent: agentName, message: 'Use SSE endpoint for streaming logs' });
+}
+
+/**
+ * GET /api/agents/:name/config — return the agent's on-disk OpenClaw config.
+ */
+export async function handleAgentConfig(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  agentName: string,
+  config: BscsConfig,
+): Promise<void> {
+  if (!config.agents?.[agentName]) {
+    jsonError(res, `Agent "${agentName}" not found`, 404);
+    return;
+  }
+  try {
+    const configPath = getAgentConfigPath(agentName);
+    const raw = await readFile(configPath, 'utf-8');
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    jsonResponse(res, { name: agentName, config: parsed });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      jsonError(res, `Config file not found for agent "${agentName}"`, 404);
+      return;
+    }
+    const message = err instanceof Error ? err.message : 'Failed to read agent config';
+    jsonError(res, message, 500);
+  }
 }
 
 const AGENT_NAME_RE = /^[a-z][a-z0-9-]{1,30}$/;

@@ -23,7 +23,7 @@ import { isRateLimited } from './middleware/rate-limit.js';
 import { handlePostAuth, handleGetAuthCheck } from './auth.js';
 import { sseManager } from './sse.js';
 import { createFleetHandler } from './routes/fleet.js';
-import { handleListAgents, handleGetAgent, handleAgentAction, handleAgentLogs, handleCreateAgent, handleDeleteAgent } from './routes/agents.js';
+import { handleListAgents, handleGetAgent, handleAgentAction, handleAgentLogs, handleCreateAgent, handleDeleteAgent, handleAgentConfig } from './routes/agents.js';
 import { handleListMachines, handleGetMachine } from './routes/machines.js';
 import { handleGetDoctor, handleDoctorFix } from './routes/doctor.js';
 
@@ -259,6 +259,11 @@ async function routeRequest(
     // DELETE /api/agents/:name
     if (!sub && method === 'DELETE') {
       await handleDeleteAgent(req, res, agentName);
+      return;
+    }
+
+    if (sub === 'config' && method === 'GET') {
+      await handleAgentConfig(req, res, agentName, config);
       return;
     }
 
