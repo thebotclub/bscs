@@ -9,8 +9,11 @@ import {
   startAgent,
   stopAgent,
   restartAgent,
+  createAgent,
+  destroyAgent,
 } from '../../core/agent.js';
 import { jsonResponse, jsonError } from '../middleware/errors.js';
+import { readBody } from '../middleware/body.js';
 
 const ALLOWED_ACTIONS = new Set(['start', 'stop', 'restart']);
 
@@ -97,4 +100,57 @@ export async function handleAgentLogs(
   // Return a simple JSON response indicating logs are available.
   // Full streaming log support would use SSE; this is the basic REST variant.
   jsonResponse(res, { agent: agentName, message: 'Use SSE endpoint for streaming logs' });
+}
+
+const AGENT_NAME_RE = /^[a-z][a-z0-9-]{1,30}$/;
+
+/**
+ * POST /api/agents — create a new agent.
+ */
+export async function handleCreateAgent(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  try {
+    const raw = await readBody(req);
+    const body = JSON.parse(raw) as Record<string, unknown>;
+
+    const name = typeof body.name === 'string' ? body.name : '';
+    if (!AGENT_NAME_RE.test(name)) {
+      jsonError(res, 'Invalid agent name: must match /^[a-z][a-z0-9-]{1,30}$/', 400);
+      return;
+    }
+
+    const role = typeof body.role === 'string' ? body.role : 'coding';
+    const dryRun = body.dryRun === true;
+
+    const result = await createAgent({
+      name,
+      role: role as import('../../util/types.js').AgentRole,
+      image: typeof body.image === 'string' ? body.image : undefined,
+      model: typeof body.model === 'string' ? body.model : undefined,
+      dryRun,
+    });
+    jsonResponse(res, result, 201);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to create agent';
+    jsonError(res, message, 500);
+  }
+}
+
+/**
+ * DELETE /api/agents/:name — destroy an agent.
+ */
+export async function handleDeleteAgent(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  agentName: string,
+): Promise<void> {
+  try {
+    await destroyAgent(agentName);
+    jsonResponse(res, { ok: true });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to delete agent';
+    jsonError(res, message, 500);
+  }
 }

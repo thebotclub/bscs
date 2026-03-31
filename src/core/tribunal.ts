@@ -1,7 +1,7 @@
 /**
  * Core tribunal module — install, configure, health check.
  */
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -37,7 +37,7 @@ export interface TribunalHealthResult {
 
 export function isTribunalInstalled(): boolean {
   try {
-    execSync('command -v tribunal', { stdio: 'ignore' });
+    execFileSync('which', ['tribunal'], { stdio: 'ignore' });
     return true;
   } catch {
     return false;
@@ -46,7 +46,7 @@ export function isTribunalInstalled(): boolean {
 
 export function getTribunalVersion(): string | null {
   try {
-    return execSync('tribunal --version', { encoding: 'utf-8' }).trim();
+    return execFileSync('tribunal', ['--version'], { encoding: 'utf-8' }).trim();
   } catch {
     return null;
   }
@@ -56,17 +56,17 @@ export function installTribunal(): { success: boolean; error?: string } {
   try {
     let pipCmd = 'pip';
     try {
-      execSync('command -v pipx', { stdio: 'ignore' });
+      execFileSync('which', ['pipx'], { stdio: 'ignore' });
       pipCmd = 'pipx';
     } catch {
       try {
-        execSync('command -v pip3', { stdio: 'ignore' });
+        execFileSync('which', ['pip3'], { stdio: 'ignore' });
         pipCmd = 'pip3';
       } catch {
         // fall back to pip
       }
     }
-    execSync(`${pipCmd} install tribunal`, { stdio: 'inherit' });
+    execFileSync(pipCmd, ['install', 'tribunal'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 120000 });
     return { success: true };
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) };

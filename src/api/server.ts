@@ -8,6 +8,9 @@
  *   - SSE endpoint at /api/events
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
+import { existsSync, readFileSync } from 'fs';
+import { join, extname } from 'path';
+import { fileURLToPath } from 'url';
 import { loadOrCreateAuthToken, validateAuthToken } from '../core/auth.js';
 import { loadConfig } from '../core/config.js';
 import { createLogger } from '../util/logger.js';
@@ -15,15 +18,72 @@ import { createLogger } from '../util/logger.js';
 import { isAllowedOrigin } from './middleware/cors.js';
 import { extractAuth } from './middleware/auth.js';
 import { jsonError } from './middleware/errors.js';
+import { isRateLimited } from './middleware/rate-limit.js';
 
 import { handlePostAuth, handleGetAuthCheck } from './auth.js';
 import { sseManager } from './sse.js';
 import { createFleetHandler } from './routes/fleet.js';
-import { handleListAgents, handleGetAgent, handleAgentAction, handleAgentLogs } from './routes/agents.js';
+import { handleListAgents, handleGetAgent, handleAgentAction, handleAgentLogs, handleCreateAgent, handleDeleteAgent } from './routes/agents.js';
 import { handleListMachines, handleGetMachine } from './routes/machines.js';
 import { handleGetDoctor, handleDoctorFix } from './routes/doctor.js';
 
 const logger = createLogger('api-server');
+
+const __dirname = fileURLToPath(new URL('.', import.meta.url));
+
+const MIME_TYPES: Record<string, string> = {
+  '.html': 'text/html',
+  '.js': 'application/javascript',
+  '.css': 'text/css',
+  '.json': 'application/json',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+};
+
+function serveDashboardFile(res: ServerResponse, url: string): void {
+  const dashboardDir = join(__dirname, '..', '..', 'dashboard');
+
+  const urlPath = decodeURIComponent(url.split('?')[0] || '/');
+  const safePath = urlPath.replace(/\.\./g, '');
+
+  const resolved = join(dashboardDir, safePath === '/' ? 'index.html' : safePath);
+
+  // Ensure resolved path is within dashboardDir
+  if (!resolved.startsWith(dashboardDir)) {
+    res.writeHead(403, { 'Content-Type': 'text/plain' });
+    res.end('Forbidden');
+    return;
+  }
+
+  let filePath = resolved;
+
+  // SPA fallback: if the file doesn't exist, serve index.html
+  if (!existsSync(filePath)) {
+    filePath = join(dashboardDir, 'index.html');
+  }
+
+  if (!existsSync(filePath)) {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Dashboard not built. Run: npm run build:ui');
+    return;
+  }
+
+  try {
+    const content = readFileSync(filePath);
+    const ext = extname(filePath);
+    const mimeType = MIME_TYPES[ext] || 'application/octet-stream';
+
+    res.writeHead(200, {
+      'Content-Type': mimeType,
+      'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=3600',
+    });
+    res.end(content);
+  } catch {
+    res.writeHead(500, { 'Content-Type': 'text/plain' });
+    res.end('Internal server error');
+  }
+}
 
 export interface ApiServer {
   port: number;
@@ -67,6 +127,10 @@ export function startApiServer(port = 3200, bind = '127.0.0.1'): Promise<ApiServ
 
       applyCors(req, res);
 
+      // Security headers
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('X-Frame-Options', 'DENY');
+
       // Handle preflight
       if (method === 'OPTIONS') {
         res.writeHead(204);
@@ -74,9 +138,9 @@ export function startApiServer(port = 3200, bind = '127.0.0.1'): Promise<ApiServ
         return;
       }
 
-      // Only handle /api/ routes
+      // Serve dashboard static files for non-API routes
       if (!url.startsWith('/api/')) {
-        jsonError(res, 'Not found', 404);
+        serveDashboardFile(res, url);
         return;
       }
 
@@ -136,6 +200,11 @@ async function routeRequest(
 ): Promise<void> {
   // POST /api/auth — token → cookie
   if (url === '/api/auth' && method === 'POST') {
+    const clientIp = req.socket.remoteAddress || 'unknown';
+    if (isRateLimited(clientIp)) {
+      jsonError(res, 'Too many requests', 429);
+      return;
+    }
     await handlePostAuth(req, res, authToken);
     return;
   }
@@ -170,6 +239,12 @@ async function routeRequest(
     return;
   }
 
+  // POST /api/agents — create a new agent
+  if (url === '/api/agents' && method === 'POST') {
+    await handleCreateAgent(req, res);
+    return;
+  }
+
   // Agent sub-routes: /api/agents/:name[/action]
   const agentMatch = url.match(/^\/api\/agents\/([^/]+)(?:\/(.+))?$/);
   if (agentMatch) {
@@ -178,6 +253,12 @@ async function routeRequest(
 
     if (!sub && method === 'GET') {
       await handleGetAgent(req, res, agentName, config);
+      return;
+    }
+
+    // DELETE /api/agents/:name
+    if (!sub && method === 'DELETE') {
+      await handleDeleteAgent(req, res, agentName);
       return;
     }
 

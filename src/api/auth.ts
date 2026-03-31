@@ -5,18 +5,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { validateAuthToken } from '../core/auth.js';
 import { extractAuth, createSessionCookie } from './middleware/auth.js';
 import { jsonResponse, jsonError } from './middleware/errors.js';
-
-/**
- * Read the full request body as a string.
- */
-function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
-    req.on('error', reject);
-  });
-}
+import { readBody } from './middleware/body.js';
 
 /**
  * POST /api/auth — accepts JSON body { token: string }.

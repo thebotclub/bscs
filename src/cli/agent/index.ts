@@ -20,6 +20,8 @@ import {
   getModelForRole,
 } from '../../core/agent.js';
 import { createLogger } from '../../util/logger.js';
+import { withErrorHandler } from '../../util/errors.js';
+import { requireDocker } from '../../util/docker-check.js';
 import type { AgentRole } from '../../util/types.js';
 
 const logger = createLogger('agent');
@@ -42,6 +44,8 @@ export function createAgentCreateCommand(): Command {
       dryRun?: boolean;
       json?: boolean;
     }) => {
+      await withErrorHandler(async () => {
+      await requireDocker();
       const { role, model, noStart, dryRun, json } = options;
       
       logger.debug({ name, options }, 'Creating agent');
@@ -186,6 +190,7 @@ export function createAgentCreateCommand(): Command {
         logger.error({ err }, 'Failed to create agent');
         process.exit(1);
       }
+      });
     });
 }
 
@@ -203,6 +208,8 @@ export function createAgentDestroyCommand(): Command {
       dryRun?: boolean;
       json?: boolean;
     }) => {
+      await withErrorHandler(async () => {
+      await requireDocker();
       const { volumes, dryRun, json } = options;
       // Note: force is implicitly handled by Docker - containers are force-stopped if running
       
@@ -271,6 +278,7 @@ export function createAgentDestroyCommand(): Command {
         logger.error({ err }, 'Failed to destroy agent');
         process.exit(1);
       }
+      });
     });
 }
 
@@ -280,6 +288,7 @@ export function createAgentStatusCommand(): Command {
     .argument('[name]', 'Agent name (omit for all agents)')
     .option('--json', 'Output as JSON')
     .action(async (name?: string, options?: { json?: boolean }) => {
+      await withErrorHandler(async () => {
       logger.debug({ name }, 'Checking agent status');
       
       const config = loadConfig();
@@ -370,6 +379,7 @@ export function createAgentStatusCommand(): Command {
           }
         }
       }
+      });
     });
 }
 
@@ -394,6 +404,8 @@ export function createAgentStartCommand(): Command {
     .argument('<name>', 'Agent name')
     .option('--json', 'Output as JSON')
     .action(async (name: string, options: { json?: boolean }) => {
+      await withErrorHandler(async () => {
+      await requireDocker();
       const config = loadConfig();
       if (!config.agents?.[name]) {
         console.error(chalk.red(`Agent "${name}" not found in config`));
@@ -413,6 +425,7 @@ export function createAgentStartCommand(): Command {
         console.error(chalk.red(`Failed to start agent: ${message}`));
         process.exit(1);
       }
+      });
     });
 }
 
@@ -422,6 +435,8 @@ export function createAgentStopCommand(): Command {
     .argument('<name>', 'Agent name')
     .option('--json', 'Output as JSON')
     .action(async (name: string, options: { json?: boolean }) => {
+      await withErrorHandler(async () => {
+      await requireDocker();
       const config = loadConfig();
       if (!config.agents?.[name]) {
         console.error(chalk.red(`Agent "${name}" not found in config`));
@@ -441,6 +456,7 @@ export function createAgentStopCommand(): Command {
         console.error(chalk.red(`Failed to stop agent: ${message}`));
         process.exit(1);
       }
+      });
     });
 }
 
@@ -450,6 +466,8 @@ export function createAgentRestartCommand(): Command {
     .argument('<name>', 'Agent name')
     .option('--json', 'Output as JSON')
     .action(async (name: string, options: { json?: boolean }) => {
+      await withErrorHandler(async () => {
+      await requireDocker();
       const config = loadConfig();
       if (!config.agents?.[name]) {
         console.error(chalk.red(`Agent "${name}" not found in config`));
@@ -470,6 +488,7 @@ export function createAgentRestartCommand(): Command {
         console.error(chalk.red(`Failed to restart agent: ${message}`));
         process.exit(1);
       }
+      });
     });
 }
 
@@ -480,6 +499,8 @@ export function createAgentLogsCommand(): Command {
     .option('-f, --follow', 'Follow log output')
     .option('--tail <lines>', 'Number of lines to show from end', '100')
     .action(async (name: string, options: { follow?: boolean; tail: string }) => {
+      await withErrorHandler(async () => {
+      await requireDocker();
       const config = loadConfig();
       if (!config.agents?.[name]) {
         console.error(chalk.red(`Agent "${name}" not found in config`));
@@ -498,6 +519,7 @@ export function createAgentLogsCommand(): Command {
         console.error(chalk.red(`Failed to get logs: ${message}`));
         process.exit(1);
       }
+      });
     });
 }
 
@@ -506,6 +528,8 @@ export function createAgentShellCommand(): Command {
     .description('Open a shell in an agent container')
     .argument('<name>', 'Agent name')
     .action(async (name: string) => {
+      await withErrorHandler(async () => {
+      await requireDocker();
       const config = loadConfig();
       if (!config.agents?.[name]) {
         console.error(chalk.red(`Agent "${name}" not found in config`));
@@ -522,6 +546,7 @@ export function createAgentShellCommand(): Command {
         console.error(chalk.red(`Failed to open shell: ${message}`));
         process.exit(1);
       }
+      });
     });
 }
 

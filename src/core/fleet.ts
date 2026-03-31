@@ -4,9 +4,11 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
+import { isLocalMachine } from '../util/network.js';
 import { homedir, userInfo } from 'os';
 import { loadConfig } from './config.js';
+import { sshExec } from '../util/ssh.js';
 import type { AgentConfig } from '../util/types.js';
 import {
   listBscsContainers,
@@ -51,32 +53,17 @@ interface RemoteContainerInfo {
   image: string;
 }
 
-function getLocalIps(): string[] {
-  try {
-    const result = execSync(
-      "/sbin/ifconfig 2>/dev/null | grep 'inet ' | awk '{print $2}' || ip -4 addr show 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1",
-      { encoding: 'utf8', timeout: 3000 },
-    );
-    return result.trim().split('\n').filter(Boolean);
-  } catch {
-    return ['127.0.0.1'];
-  }
-}
-
-function isLocalMachine(host: string): boolean {
-  const localIps = getLocalIps();
-  return host === 'localhost' || host === '127.0.0.1' || localIps.includes(host);
-}
-
 async function getRemoteDockerContainers(
   host: string,
   user: string,
   sshAlias?: string,
 ): Promise<RemoteContainerInfo[]> {
   try {
-    const target = sshAlias || `${user}@${host}`;
-    const cmd = `ssh -o ConnectTimeout=5 -o BatchMode=yes ${target} 'export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"; docker ps -a --format "{{.Names}}|{{.Status}}|{{.Image}}" 2>/dev/null'`;
-    const result = execSync(cmd, { encoding: 'utf8', timeout: 10000 });
+    const result = sshExec(
+      { host, user, sshAlias },
+      'export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"; docker ps -a --format "{{.Names}}|{{.Status}}|{{.Image}}" 2>/dev/null',
+      { timeoutMs: 10000 },
+    );
     return result
       .trim()
       .split('\n')
@@ -105,9 +92,11 @@ async function checkRemoteNativeAgent(
   sshAlias?: string,
 ): Promise<boolean> {
   try {
-    const target = sshAlias || `${user}@${host}`;
-    const cmd = `ssh -o ConnectTimeout=5 -o BatchMode=yes ${target} 'curl -s --max-time 3 http://127.0.0.1:${port}/healthz 2>/dev/null'`;
-    const result = execSync(cmd, { encoding: 'utf8', timeout: 10000 });
+    const result = sshExec(
+      { host, user, sshAlias },
+      `curl -s --max-time 3 http://127.0.0.1:${port}/healthz 2>/dev/null`,
+      { timeoutMs: 10000 },
+    );
     return result.includes('"ok"') || result.includes('"live"');
   } catch {
     return false;
@@ -221,7 +210,7 @@ export async function getFleetStatus(includeAll = true): Promise<FleetStatusResu
         const gwPort = agentConfig.ports?.gateway || 18789;
         if (isLocal) {
           try {
-            const res = execSync(`curl -s --max-time 2 http://127.0.0.1:${gwPort}/healthz`, {
+            const res = execFileSync('curl', ['-s', '--max-time', '2', `http://127.0.0.1:${gwPort}/healthz`], {
               encoding: 'utf8',
               timeout: 5000,
             });

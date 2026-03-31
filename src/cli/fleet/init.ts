@@ -5,6 +5,7 @@ import { homedir } from 'os';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { dirname } from 'path';
 import { createLogger } from '../../util/logger.js';
+import { withErrorHandler } from '../../util/errors.js';
 
 const logger = createLogger('fleet');
 
@@ -54,6 +55,7 @@ export function createFleetInitCommand(): Command {
     .option('--fleet-name <name>', 'Fleet name')
     .option('--image <image>', 'Default Docker image')
     .action(async (options: { nonInteractive?: boolean; fleetName?: string; image?: string }) => {
+      await withErrorHandler(async () => {
       logger.debug({ options }, 'Initializing fleet');
       
       const configPath = getConfigPath();
@@ -156,6 +158,7 @@ export function createFleetInitCommand(): Command {
       console.log(chalk.dim('  3. Run "bscs dashboard" to launch the web UI'));
       
       logger.info({ configPath, fleetName: answers.fleetName }, 'Fleet initialized');
+      });
     });
 }
 
@@ -165,6 +168,7 @@ export function createFleetImportCommand(): Command {
     .option('--from-fleet-sh <path>', 'Path to fleet.sh config directory')
     .option('--dry-run', 'Show what would be imported without making changes')
     .action(async (options: { fromFleetSh?: string; dryRun?: boolean }) => {
+      await withErrorHandler(async () => {
       logger.debug({ options }, 'Importing from fleet.sh');
       
       if (!options.fromFleetSh) {
@@ -295,5 +299,6 @@ export function createFleetImportCommand(): Command {
       console.log(chalk.dim('Note: Containers were not created. Run "bscs fleet reconcile" to create them.'));
       
       logger.info({ configPath, agentCount: Object.keys(agents).length }, 'Fleet imported');
+      });
     });
 }

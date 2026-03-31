@@ -1,10 +1,9 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'http';
+import { createServer, type ServerResponse } from 'http';
 import { existsSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { execSync, exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { userInfo } from 'os';
-import chalk from 'chalk';
 import { createLogger } from '../util/logger.js';
 import { getFleetStatus } from '../core/fleet.js';
 import { getMachineStatus } from '../cli/machine/index.js';
@@ -13,6 +12,8 @@ import type { BscsConfig, AgentConfig } from '../util/types.js';
 import { Command } from 'commander';
 import { createHash } from 'crypto';
 import { loadOrCreateAuthToken, validateAuthToken, extractBearerToken } from '../core/auth.js';
+import { readBody } from '../api/middleware/body.js';
+import { isLocalMachine } from '../util/network.js';
 
 function extractCookieToken(cookieHeader: string | undefined): string | null {
   if (!cookieHeader) return null;
@@ -36,30 +37,9 @@ export interface DashboardServer {
 // Helpers
 // ============================================================================
 
-function getLocalIps(): string[] {
-  try {
-    const result = execSync("/sbin/ifconfig 2>/dev/null | grep 'inet ' | awk '{print $2}' || ip -4 addr show 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1", { encoding: 'utf8', timeout: 3000 });
-    return result.trim().split('\n').filter(Boolean);
-  } catch {
-    return ['127.0.0.1'];
-  }
-}
-
-function isLocalMachine(host: string): boolean {
-  const localIps = getLocalIps();
-  return host === 'localhost' || host === '127.0.0.1' || localIps.includes(host);
-}
-
 function getMachineName(ip: string, config: BscsConfig): string {
   const machine = config.machines?.[ip];
   return machine?.sshAlias || ip;
-}
-
-function getSshTarget(machineHost: string, config: BscsConfig): string {
-  const machine = config.machines?.[machineHost];
-  if (machine?.sshAlias) return machine.sshAlias;
-  const user = machine?.user || userInfo().username;
-  return `${user}@${machineHost}`;
 }
 
 function executeCommand(command: string, timeoutMs = 30000): Promise<{ ok: boolean; output: string }> {
@@ -84,9 +64,18 @@ async function executeAgentCommand(agentName: string, command: string, config: B
   if (local) {
     return executeCommand(command);
   } else {
-    const target = getSshTarget(machine, config);
-    const escaped = command.replace(/'/g, "'\\''");
-    return executeCommand(`ssh -o ConnectTimeout=10 -o BatchMode=yes ${target} '${escaped}'`);
+    const machineConfig = config.machines?.[machine];
+    const target = machineConfig?.sshAlias || `${machineConfig?.user || userInfo().username}@${machine}`;
+    const args = ['-o', 'ConnectTimeout=10', '-o', 'BatchMode=yes', target, command];
+    return new Promise((resolve) => {
+      execFile('ssh', args, { timeout: 30000, encoding: 'utf8' }, (err, stdout, stderr) => {
+        if (err) {
+          resolve({ ok: false, output: (stderr || err.message || '').trim() });
+        } else {
+          resolve({ ok: true, output: (stdout || '').trim() });
+        }
+      });
+    });
   }
 }
 
@@ -208,14 +197,7 @@ function isAllowedOrigin(origin: string | undefined): boolean {
 // API Handlers
 // ============================================================================
 
-async function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
-    req.on('end', () => resolve(body));
-    req.on('error', reject);
-  });
-}
+// readBody imported from ../api/middleware/body.js
 
 function jsonResponse(res: ServerResponse, data: unknown, status = 200): void {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -257,7 +239,13 @@ async function handleMachinesList(config: BscsConfig): Promise<Record<string, un
       status = 'online';
     } else {
       const target = mc.sshAlias || `${mc.user || userInfo().username}@${ip}`;
-      const result = await executeCommand(`ssh -o ConnectTimeout=5 -o BatchMode=yes ${target} 'echo ok'`, 8000);
+      const args = ['-o', 'ConnectTimeout=5', '-o', 'BatchMode=yes', target, 'echo ok'];
+      const result = await new Promise<{ ok: boolean; output: string }>((resolve) => {
+        execFile('ssh', args, { timeout: 8000, encoding: 'utf8' }, (err, stdout, stderr) => {
+          if (err) resolve({ ok: false, output: (stderr || err.message || '').trim() });
+          else resolve({ ok: true, output: (stdout || '').trim() });
+        });
+      });
       status = result.ok ? 'online' : 'offline';
     }
 
@@ -557,17 +545,21 @@ export function startDashboardServer(port = 3200, bind = '127.0.0.1'): Promise<D
               return;
             }
 
-            let cmd: string;
+            let result: { ok: boolean; output: string };
 
             if (!target || target === 'local') {
-              cmd = command;
+              result = await executeCommand(command, 30000);
             } else {
               // target is sshAlias or host — run via SSH
-              const escaped = command.replace(/'/g, "'\\''");
-              cmd = `ssh -o ConnectTimeout=10 -o BatchMode=yes ${target} '${escaped}'`;
+              const args = ['-o', 'ConnectTimeout=10', '-o', 'BatchMode=yes', target, command];
+              result = await new Promise<{ ok: boolean; output: string }>((resolve) => {
+                execFile('ssh', args, { timeout: 30000, encoding: 'utf8' }, (err, stdout, stderr) => {
+                  if (err) resolve({ ok: false, output: (stderr || err.message || '').trim() });
+                  else resolve({ ok: true, output: (stdout || '').trim() });
+                });
+              });
             }
 
-            const result = await executeCommand(cmd, 30000);
             jsonResponse(res, { ok: result.ok, output: result.output || (result.ok ? 'Fix applied' : 'Fix failed') });
             return;
           }
@@ -2132,61 +2124,50 @@ connectWS();
 </html>`;
 }
 
+/**
+ * @deprecated This module is superseded by src/api/server.ts which serves both
+ * the API and the dashboard static files. The createDashboardCommand() exported
+ * here now delegates to the API server. This file will be removed in the next
+ * major release.
+ */
 export function createDashboardCommand(): Command {
   const command = new Command('dashboard')
-    .description('Start the BSCS web dashboard')
-    .option('-p, --port <port>', 'Port to listen on', '3200')
-    .option('--bind <address>', 'Address to bind to (default: 127.0.0.1; use 0.0.0.0 for all interfaces)', '127.0.0.1')
-    .option('--no-open', 'Do not open browser automatically')
-    .action(async (options: { port: string; bind: string; open: boolean }) => {
+    .description('Launch the BSCS dashboard')
+    .option('-p, --port <port>', 'Port', '3200')
+    .option('-b, --bind <address>', 'Bind address', '127.0.0.1')
+    .option('-o, --open', 'Open in browser')
+    .action(async (options) => {
       const port = parseInt(options.port, 10);
       const bind = options.bind || '127.0.0.1';
 
       try {
-        const server = await startDashboardServer(port, bind);
+        // Use the new API server which also serves static dashboard files
+        const { startApiServer } = await import('../api/server.js');
+        const server = await startApiServer(port, bind);
 
-        console.log();
-        console.log(chalk.bold.cyan('📊 BSCS Dashboard'));
-        console.log();
-        console.log(chalk.dim('   URL:'), chalk.white(`http://localhost:${port}`));
-        console.log(chalk.dim('   API:'), chalk.white(`http://localhost:${port}/api/fleet`));
-        console.log(chalk.dim('   Token:'), chalk.yellow(server.token));
-        console.log();
-        console.log(chalk.dim('   Bearer token required for all /api/ requests.'));
-        console.log(chalk.dim(`   Token stored at: ~/.config/bscs/dashboard-token`));
-        console.log();
-        console.log(chalk.dim('Press Ctrl+C to stop'));
-        console.log();
-        
+        console.log(`Dashboard: http://localhost:${port}`);
+        console.log(`Auth token: ${server.token}`);
+
         if (options.open) {
+          const { execFileSync: execOpen } = await import('child_process');
+          const url = `http://localhost:${port}`;
           try {
             const platform = process.platform;
-            const url = `http://localhost:${port}`;
-            
             if (platform === 'darwin') {
-              execSync(`open ${url}`);
+              execOpen('open', [url]);
             } else if (platform === 'linux') {
-              execSync(`xdg-open ${url}`);
-            } else if (platform === 'win32') {
-              execSync(`start ${url}`);
+              execOpen('xdg-open', [url]);
             }
           } catch {
-            // Failed to open browser, ignore
+            // Failed to open browser
           }
         }
-        
-        process.on('SIGINT', () => {
-          console.log(chalk.dim('\nShutting down...'));
-          server.close();
-          process.exit(0);
-        });
-        
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        console.error(chalk.red(`Failed to start dashboard: ${message}`));
+        console.error(`Failed to start dashboard: ${message}`);
         process.exit(1);
       }
     });
-  
+
   return command;
 }

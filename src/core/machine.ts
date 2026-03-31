@@ -4,6 +4,7 @@
 import { execSync } from 'child_process';
 import { loadConfig, saveConfig } from './config.js';
 import { createLogger } from '../util/logger.js';
+import { sshExec } from '../util/ssh.js';
 import type { MachineRole, Machine } from '../util/types.js';
 
 const logger = createLogger('machine');
@@ -106,15 +107,17 @@ export async function getMachineStatus(
       }
     } else {
       try {
-        execSync(
-          `ssh -o ConnectTimeout=3 -o BatchMode=yes -p ${machine.port} ${machine.user}@${machine.host} true`,
-          { stdio: 'ignore', timeout: 5000 },
+        sshExec(
+          { host: machine.host, user: machine.user, port: machine.port },
+          'true',
+          { timeoutMs: 5000, stdio: 'ignore' },
         );
         reachable = true;
         try {
-          execSync(
-            `ssh -o ConnectTimeout=3 -p ${machine.port} ${machine.user}@${machine.host} docker info`,
-            { stdio: 'ignore', timeout: 5000 },
+          sshExec(
+            { host: machine.host, user: machine.user, port: machine.port },
+            'docker info',
+            { timeoutMs: 5000, stdio: 'ignore' },
           );
           dockerRunning = true;
         } catch {
@@ -197,9 +200,10 @@ export async function bootstrapMachine(
 
   for (const step of steps) {
     logger.info({ step: step.name }, step.description);
-    execSync(
-      `ssh -p ${machine.port} ${machine.user}@${machine.host} '${step.command}'`,
-      { stdio: 'inherit', timeout: 120000 },
+    sshExec(
+      { host: machine.host, user: machine.user, port: machine.port },
+      step.command,
+      { timeoutMs: 120000, stdio: 'inherit' },
     );
   }
 

@@ -1,6 +1,8 @@
-import { exec, execSync } from 'child_process';
+import { exec } from 'child_process';
 import { userInfo } from 'os';
 import type { BscsConfig } from '../util/types.js';
+import { isLocalMachine } from '../util/network.js';
+import { formatUptime } from '../util/format.js';
 
 // =============================================================================
 // Types
@@ -44,23 +46,6 @@ function executeCommand(command: string, timeoutMs = 10000): Promise<{ ok: boole
   });
 }
 
-function getLocalIps(): string[] {
-  try {
-    const result = execSync(
-      "/sbin/ifconfig 2>/dev/null | grep 'inet ' | awk '{print $2}' || ip -4 addr show 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1",
-      { encoding: 'utf8', timeout: 3000 }
-    );
-    return result.trim().split('\n').filter(Boolean);
-  } catch {
-    return ['127.0.0.1'];
-  }
-}
-
-function isLocalMachine(host: string): boolean {
-  const localIps = getLocalIps();
-  return host === 'localhost' || host === '127.0.0.1' || localIps.includes(host);
-}
-
 function getSshTarget(machineHost: string, config: BscsConfig): string {
   const machine = config.machines?.[machineHost];
   if (machine?.sshAlias) return machine.sshAlias;
@@ -77,17 +62,6 @@ function remoteOrLocal(host: string, cmd: string, config: BscsConfig): string {
   if (isLocalMachine(host)) return cmd;
   const target = getSshTarget(host, config);
   return sshCommand(target, cmd);
-}
-
-function formatUptime(seconds: number): string {
-  const days = Math.floor(seconds / 86400);
-  const hours = Math.floor((seconds % 86400) / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
-  const parts: string[] = [];
-  if (days > 0) parts.push(`${days}d`);
-  if (hours > 0) parts.push(`${hours}h`);
-  parts.push(`${mins}m`);
-  return parts.join(' ');
 }
 
 async function detectOS(host: string, config: BscsConfig): Promise<'macos' | 'linux'> {

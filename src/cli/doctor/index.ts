@@ -4,6 +4,7 @@ import { execSync } from 'child_process';
 import { createLogger } from '../../util/logger.js';
 import { loadConfig } from '../../core/config.js';
 import { runDoctor, fixDoctorIssue, type DoctorResult } from '../../core/doctor.js';
+import { withErrorHandler } from '../../util/errors.js';
 
 const logger = createLogger('doctor');
 
@@ -250,6 +251,7 @@ export function createDoctorCommand(): Command {
     .option('--deep', 'Run deep checks (extended diagnostics, log scanning)')
     .option('--fix', 'Auto-fix all fixable issues (use with --fleet)')
     .action(async (options: { json?: boolean; fleet?: boolean; deep?: boolean; fix?: boolean }) => {
+      await withErrorHandler(async () => {
       // Fleet doctor mode
       if (options.fleet) {
         logger.debug('Running fleet doctor');
@@ -334,6 +336,7 @@ export function createDoctorCommand(): Command {
       } else {
         console.log(chalk.green('All checks passed!'));
       }
+      });
     });
 
   return command;

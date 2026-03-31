@@ -14,6 +14,7 @@
     "dev": "tsx watch bin/bscs.ts",
     "lint": "eslint src/ bin/ test/",
     "typecheck": "tsc --noEmit",
+    "typecheck:ui": "tsc --noEmit -p tsconfig.ui.json",
     "format": "prettier --write .",
     "test": "vitest run",
     "test:watch": "vitest",

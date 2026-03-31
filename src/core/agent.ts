@@ -2,7 +2,7 @@
  * Core agent module — agent CRUD and lifecycle operations.
  * CLI files should be thin wrappers that call these functions.
  */
-import { execSync, spawn, type ChildProcess } from 'child_process';
+import { execFileSync, spawn, type ChildProcess } from 'child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
@@ -16,6 +16,7 @@ import {
   pullImage,
 } from './docker.js';
 import { loadConfig, saveConfig, type BscsConfig } from './config.js';
+import { UserError } from '../util/errors.js';
 import type { AgentRole } from '../util/types.js';
 
 // ── Port Allocation ──────────────────────────────────────────────────
@@ -50,7 +51,10 @@ export async function allocatePorts(config: BscsConfig): Promise<{ gateway?: num
     }
   }
 
-  throw new Error('No available ports in configured range');
+  throw new UserError(
+    `No available ports in range ${start}-${end}`,
+    'Consider:\n  • Remove stopped agents: bscs agent destroy <name>\n  • Expand the port range in ~/.config/bscs/config.json',
+  );
 }
 
 // ── Resource / Model Helpers ─────────────────────────────────────────
@@ -92,18 +96,18 @@ export async function setupTribunal(
   try {
     let pipCmd = 'pip';
     try {
-      execSync('command -v pipx', { stdio: 'ignore' });
+      execFileSync('which', ['pipx'], { stdio: 'ignore' });
       pipCmd = 'pipx';
     } catch {
       try {
-        execSync('command -v pip3', { stdio: 'ignore' });
+        execFileSync('which', ['pip3'], { stdio: 'ignore' });
         pipCmd = 'pip3';
       } catch {
         // Fall back to pip
       }
     }
 
-    execSync(`${pipCmd} install tribunal`, { stdio: 'inherit' });
+    execFileSync(pipCmd, ['install', 'tribunal'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 120000 });
 
     const tribunalDir = join(agentPath, '.tribunal');
     if (!existsSync(tribunalDir)) {

@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { createLogger } from '../util/logger.js';
 import { loadConfig } from './config.js';
 
@@ -39,7 +39,7 @@ export async function resolveSecret(ref: string): Promise<string> {
   }
 
   try {
-    const result = execSync(`op read "${ref}"`, {
+    const result = execFileSync('op', ['read', ref], {
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe']
     })

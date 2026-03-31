@@ -8,9 +8,9 @@ import { userInfo } from 'os';
 export const MachineRoleSchema = z.enum(['controller', 'worker', 'gpu']);
 
 export const MachineSchema = z.object({
-  host: z.string(),
+  host: z.string().regex(/^[a-zA-Z0-9._:-]+$/, 'Invalid hostname characters'),
   // Default to the current OS user; consumers can override per-machine
-  user: z.string().default(() => userInfo().username || process.env.USER || process.env.LOGNAME || 'root'),
+  user: z.string().regex(/^[a-zA-Z0-9._-]+$/, 'Invalid username characters').default(() => userInfo().username || process.env.USER || process.env.LOGNAME || 'root'),
   role: MachineRoleSchema,
   port: z.number().int().min(1).max(65535).default(22),
   sshAlias: z.string().optional(),

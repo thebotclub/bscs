@@ -9,6 +9,7 @@ import {
   stopContainer,
   removeContainer,
 } from '../../core/docker.js';
+import { withErrorHandler } from '../../util/errors.js';
 
 // Import the SSH-aware getFleetStatus from core — single implementation for both CLI and dashboard.
 import {
@@ -26,6 +27,7 @@ export function createFleetStatusCommand(): Command {
     .option('--all', 'Include all containers')
     .option('--json', 'Output as JSON')
     .action(async (options: { all?: boolean; json?: boolean }) => {
+      await withErrorHandler(async () => {
       try {
         const status = await getFleetStatus(options.all !== false);
 
@@ -71,6 +73,7 @@ export function createFleetStatusCommand(): Command {
         console.error(chalk.red('Failed to get fleet status'), err);
         process.exit(1);
       }
+      });
     });
 }
 
@@ -80,6 +83,7 @@ export function createFleetReconcileCommand(): Command {
     .option('--dry-run', 'Show changes without applying')
     .option('--json', 'Output as JSON')
     .action(async (options: { dryRun?: boolean; json?: boolean }) => {
+      await withErrorHandler(async () => {
       const config = loadConfig();
       const changes: Array<{ action: string; agent: string; reason: string }> = [];
 
@@ -176,6 +180,7 @@ export function createFleetReconcileCommand(): Command {
       }
 
       console.log(chalk.green('\n✓ Reconciliation complete\n'));
+      });
     });
 
   return cmd;

@@ -3,6 +3,7 @@ import chalk from 'chalk';
 import { execSync } from 'child_process';
 import { hostname, platform, arch, freemem, totalmem, cpus, uptime as osUptime } from 'os';
 import { createLogger } from '../../util/logger.js';
+import { sshExec as sshExecRaw, type SshTarget } from '../../util/ssh.js';
 import { loadConfig, saveConfig } from '../../core/config.js';
 import { isDockerRunning } from '../../core/docker.js';
 import type { Machine, MachineRole } from '../../util/types.js';
@@ -101,18 +102,19 @@ function formatUptime(seconds: number): string {
 
 // SSH helper for remote commands
 function sshExec(host: string, command: string, options: { user?: string; port?: number } = {}): { stdout: string; stderr: string; code: number } {
-  const user = options.user || 'root';
-  const port = options.port || 22;
-  const sshCmd = `ssh -p ${port} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 ${user}@${host} "${command.replace(/"/g, '\\"')}"`;
-  
+  const target: SshTarget = {
+    host,
+    user: options.user || 'root',
+    port: options.port || 22,
+  };
   try {
-    const stdout = execSync(sshCmd, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+    const stdout = sshExecRaw(target, command, { timeoutMs: 30000 });
     return { stdout: stdout.trim(), stderr: '', code: 0 };
   } catch (err: unknown) {
     const error = err as { stdout?: string; stderr?: string; status?: number };
     return { 
-      stdout: (error.stdout || '').trim(), 
-      stderr: (error.stderr || '').trim(), 
+      stdout: String(error.stdout || '').trim(), 
+      stderr: String(error.stderr || '').trim(), 
       code: error.status || 1 
     };
   }
