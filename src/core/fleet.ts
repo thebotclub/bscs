@@ -819,7 +819,7 @@ export async function importFromDocker(
     }
 
     // Derive agent name from container name (strip known suffixes like -bot, -agent)
-    let agentName = containerName
+    const agentName = containerName
       .replace(/-bot$/, '')
       .replace(/-agent$/, '');
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { existsSync, mkdirSync, rmSync } from 'fs';
+import { mkdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { loadConfig, saveConfig } from '../../../src/core/config.js';
@@ -43,12 +43,16 @@ describe('OpenClaw Agent Tools (cron + config)', () => {
     return fn;
   }
 
+  const ocBase = { role: 'custom' as const, template: 'custom' as const, machine: 'localhost' };
+  const dkBase = { ...ocBase, runtime: 'docker' as const };
+
   describe('addCronJob', () => {
     it('should add a cron job to an openclaw agent', async () => {
       const { addCronJob, listCronJobs } = await import('../../../src/core/agent.js');
       const config = loadConfig();
       config.agents = {
         'oc-agent': {
+          ...ocBase,
           name: 'oc-agent',
           status: 'running',
           runtime: 'openclaw',
@@ -70,6 +74,7 @@ describe('OpenClaw Agent Tools (cron + config)', () => {
       const config = loadConfig();
       config.agents = {
         'oc-agent': {
+          ...ocBase,
           name: 'oc-agent',
           status: 'running',
           runtime: 'openclaw',
@@ -84,7 +89,7 @@ describe('OpenClaw Agent Tools (cron + config)', () => {
     it('should reject cron on docker agents', async () => {
       const { addCronJob } = await import('../../../src/core/agent.js');
       const config = loadConfig();
-      config.agents = { 'dock-agent': { name: 'dock-agent', status: 'running' } };
+      config.agents = { 'dock-agent': { ...dkBase, name: 'dock-agent', status: 'running' } };
       saveConfig(config);
 
       expect(() => addCronJob('dock-agent', { id: 'j', cron: '* * * * *', message: 'm' })).toThrow('only supported for openclaw');
@@ -97,6 +102,7 @@ describe('OpenClaw Agent Tools (cron + config)', () => {
       const config = loadConfig();
       config.agents = {
         'oc-agent': {
+          ...ocBase,
           name: 'oc-agent',
           status: 'running',
           runtime: 'openclaw',
@@ -122,6 +128,7 @@ describe('OpenClaw Agent Tools (cron + config)', () => {
       const config = loadConfig();
       config.agents = {
         'oc-agent': {
+          ...ocBase,
           name: 'oc-agent',
           status: 'running',
           runtime: 'openclaw',
@@ -140,6 +147,7 @@ describe('OpenClaw Agent Tools (cron + config)', () => {
       const config = loadConfig();
       config.agents = {
         'oc-agent': {
+          ...ocBase,
           name: 'oc-agent',
           status: 'running',
           runtime: 'openclaw',
@@ -162,7 +170,7 @@ describe('OpenClaw Agent Tools (cron + config)', () => {
     it('should reject config set on docker agents', async () => {
       const { setAgentConfig } = await import('../../../src/core/agent.js');
       const config = loadConfig();
-      config.agents = { 'dock-agent': { name: 'dock-agent', status: 'running' } };
+      config.agents = { 'dock-agent': { ...dkBase, name: 'dock-agent', status: 'running' } };
       saveConfig(config);
 
       await expect(setAgentConfig('dock-agent', 'key', 'val')).rejects.toThrow('only supported for openclaw');
@@ -180,6 +188,7 @@ describe('OpenClaw Agent Tools (cron + config)', () => {
       const config = loadConfig();
       config.agents = {
         'oc-agent': {
+          ...ocBase,
           name: 'oc-agent',
           status: 'running',
           runtime: 'openclaw',
@@ -199,6 +208,7 @@ describe('OpenClaw Agent Tools (cron + config)', () => {
       const config = loadConfig();
       config.agents = {
         'oc-agent': {
+          ...ocBase,
           name: 'oc-agent',
           status: 'running',
           runtime: 'openclaw',
@@ -215,6 +225,7 @@ describe('OpenClaw Agent Tools (cron + config)', () => {
       const config = loadConfig();
       config.agents = {
         'oc-agent': {
+          ...ocBase,
           name: 'oc-agent',
           status: 'running',
           runtime: 'openclaw',
@@ -230,7 +241,7 @@ describe('OpenClaw Agent Tools (cron + config)', () => {
     it('should reject skill removal on docker agents', async () => {
       const { addSkill } = await import('../../../src/core/agent.js');
       const config = loadConfig();
-      config.agents = { 'dock': { name: 'dock', status: 'running' } };
+      config.agents = { 'dock': { ...dkBase, name: 'dock', status: 'running' } };
       saveConfig(config);
 
       expect(() => addSkill('dock', 'test')).toThrow('only supported for openclaw');
@@ -243,6 +254,7 @@ describe('OpenClaw Agent Tools (cron + config)', () => {
       const config = loadConfig();
       config.agents = {
         'oc-agent': {
+          ...ocBase,
           name: 'oc-agent',
           status: 'running',
           runtime: 'openclaw',
@@ -259,7 +271,7 @@ describe('OpenClaw Agent Tools (cron + config)', () => {
     it('should reject identity on docker agents', async () => {
       const { setIdentity } = await import('../../../src/core/agent.js');
       const config = loadConfig();
-      config.agents = { 'dock': { name: 'dock', status: 'running' } };
+      config.agents = { 'dock': { ...dkBase, name: 'dock', status: 'running' } };
       saveConfig(config);
 
       expect(() => setIdentity('dock', 'Bot', '🤖')).toThrow('only supported for openclaw');

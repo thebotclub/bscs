@@ -54,9 +54,26 @@ function inferProviderFromModel(model: string): ProviderType {
 function resolveProvider(model: string): ResolvedProvider {
   const config = loadConfig();
   const providers = config.models?.providers ?? {};
-  const inferredType = inferProviderFromModel(model);
 
-  // Find matching enabled provider
+  // Strip provider prefix if present (e.g. "minimax/MiniMax-M2.7" → "MiniMax-M2.7")
+  const bareModel = model.includes('/') ? model.split('/').pop()! : model;
+
+  // First: exact match against configured provider model lists
+  for (const [name, provider] of Object.entries(providers)) {
+    if (!provider.enabled) continue;
+    const models = provider.models ?? [];
+    if (models.includes(bareModel)) {
+      return {
+        name,
+        type: provider.type,
+        apiKey: provider.apiKey,
+        baseUrl: provider.baseUrl ?? PROVIDER_ENDPOINTS[provider.type],
+      };
+    }
+  }
+
+  // Fallback: prefix-based inference
+  const inferredType = inferProviderFromModel(bareModel);
   for (const [name, provider] of Object.entries(providers)) {
     if (provider.type === inferredType && provider.enabled) {
       return {
@@ -209,7 +226,7 @@ function buildAnthropicRequest(
     if (body.system) payload.system = body.system;
 
     return {
-      url: `${provider.baseUrl}/messages`,
+      url: `${provider.baseUrl}/v1/messages`,
       headers: {
         'content-type': 'application/json',
         'x-api-key': provider.apiKey ?? '',
@@ -333,13 +350,19 @@ async function proxyRequest(
         } catch {
           // Non-JSON responses — still return them
         }
+
+        // Success — return immediately
+        return {
+          status: response.status,
+          headers: { 'content-type': response.headers.get('content-type') ?? 'application/json' },
+          body: responseText,
+        };
       }
 
-      return {
-        status: response.status,
-        headers: { 'content-type': response.headers.get('content-type') ?? 'application/json' },
-        body: responseText,
-      };
+      // Non-2xx response — log and try next fallback
+      lastStatus = response.status;
+      lastError = responseText.slice(0, 200);
+      logger.warn({ model: fallbackModel, provider: provider.name, status: response.status }, 'Provider returned error, trying fallback');
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
       lastStatus = 502;
