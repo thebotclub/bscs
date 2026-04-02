@@ -55,37 +55,44 @@ function resolveProvider(model: string): ResolvedProvider {
   const config = loadConfig();
   const providers = config.models?.providers ?? {};
 
-  // Strip provider prefix if present (e.g. "minimax/MiniMax-M2.7" → "MiniMax-M2.7")
-  const bareModel = model.includes('/') ? model.split('/').pop()! : model;
-
-  // First: exact match against configured provider model lists
-  for (const [name, provider] of Object.entries(providers)) {
-    if (!provider.enabled) continue;
-    const models = provider.models ?? [];
-    if (models.includes(bareModel)) {
-      return {
-        name,
-        type: provider.type,
-        apiKey: provider.apiKey,
-        baseUrl: provider.baseUrl ?? PROVIDER_ENDPOINTS[provider.type],
-      };
-    }
+  // Try full model name first (handles models with internal slashes like "Qwen/Qwen2.5-72B")
+  // Then try with first path component stripped (e.g. "minimax/MiniMax-M2.7" → "MiniMax-M2.7")
+  const candidates = [model];
+  if (model.includes('/')) {
+    candidates.push(model.substring(model.indexOf('/') + 1));
   }
 
-  // Fallback: prefix-based inference
-  const inferredType = inferProviderFromModel(bareModel);
-  for (const [name, provider] of Object.entries(providers)) {
-    if (provider.type === inferredType && provider.enabled) {
-      return {
-        name,
-        type: provider.type,
-        apiKey: provider.apiKey,
-        baseUrl: provider.baseUrl ?? PROVIDER_ENDPOINTS[provider.type],
-      };
+  for (const candidate of candidates) {
+    // First: exact match against configured provider model lists
+    for (const [name, provider] of Object.entries(providers)) {
+      if (!provider.enabled) continue;
+      const models = provider.models ?? [];
+      if (models.includes(candidate)) {
+        return {
+          name,
+          type: provider.type,
+          apiKey: provider.apiKey,
+          baseUrl: provider.baseUrl ?? PROVIDER_ENDPOINTS[provider.type],
+        };
+      }
+    }
+
+    // Fallback: prefix-based inference
+    const inferredType = inferProviderFromModel(candidate);
+    for (const [name, provider] of Object.entries(providers)) {
+      if (provider.type === inferredType && provider.enabled) {
+        return {
+          name,
+          type: provider.type,
+          apiKey: provider.apiKey,
+          baseUrl: provider.baseUrl ?? PROVIDER_ENDPOINTS[provider.type],
+        };
+      }
     }
   }
 
   // No configured provider — use defaults
+  const inferredType = inferProviderFromModel(model);
   return {
     name: inferredType,
     type: inferredType,
