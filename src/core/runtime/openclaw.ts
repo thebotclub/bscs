@@ -106,7 +106,7 @@ export class OpenClawRuntime implements OpenClawAgentRuntime {
       const output = this.exec('openclaw', ['agents', 'list', '--json'], { timeout: 10000 });
       const agents = JSON.parse(output);
       const agent = Array.isArray(agents)
-        ? agents.find((a: { name?: string }) => a.name === name)
+        ? agents.find((a: { id?: string; name?: string }) => (a.id || a.name) === name)
         : null;
 
       if (!agent) {
@@ -143,8 +143,8 @@ export class OpenClawRuntime implements OpenClawAgentRuntime {
       const output = this.exec('openclaw', ['agents', 'list', '--json'], { timeout: 10000 });
       const agents = JSON.parse(output);
       if (!Array.isArray(agents)) return [];
-      return agents.map((a: { name: string; enabled?: boolean }) => ({
-        name: a.name,
+      return agents.map((a: { id: string; name?: string; enabled?: boolean }) => ({
+        name: a.id || a.name,
         status: (a.enabled !== false ? 'running' : 'stopped') as RuntimeStatus['status'],
       }));
     } catch {

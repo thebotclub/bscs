@@ -666,14 +666,9 @@ export function importFromOpenClaw(
     throw new Error(`Failed to query OpenClaw gateway at ${gatewayUrl}: ${msg}`);
   }
 
-  let agents: Array<{
-    name: string;
-    workspace?: string;
-    model?: string;
-    channels?: Array<{ type: string; accountId: string }>;
-    skills?: string[];
-    cronJobs?: Array<{ id: string; cron: string; message: string; channel?: string }>;
-  }>;
+  // OpenClaw returns { id, workspace, model, bindings, identityName, identityEmoji, ... }
+  // Use 'id' as the canonical name (OpenClaw does not use 'name')
+  let agents: Array<Record<string, unknown>>;
 
   try {
     agents = JSON.parse(agentsJson);
@@ -688,18 +683,19 @@ export function importFromOpenClaw(
   config.agents = config.agents || {};
 
   for (const agent of agents) {
-    if (!agent.name) {
-      result.errors.push('Agent entry missing name — skipped');
+    const name = (agent.id as string) || (agent.name as string);
+    if (!name) {
+      result.errors.push('Agent entry missing id/name — skipped');
       continue;
     }
 
-    if (config.agents[agent.name]) {
-      result.skipped.push(agent.name);
+    if (config.agents[name]) {
+      result.skipped.push(name);
       continue;
     }
 
     const agentConfig: AgentConfig = {
-      name: agent.name,
+      name,
       role: 'custom',
       template: 'custom',
       machine: 'localhost',
@@ -709,22 +705,30 @@ export function importFromOpenClaw(
       status: 'running',
       openclaw: {
         gatewayUrl,
-        workspace: agent.workspace || agent.name,
-        channels: (agent.channels || []).map((ch) => ({
-          type: ch.type as 'telegram' | 'discord',
-          accountId: ch.accountId,
-        })),
-        model: agent.model ? { primary: agent.model } : undefined,
-        skills: agent.skills,
-        cronJobs: agent.cronJobs,
+        workspace: (agent.workspace as string) || name,
+        model: agent.model ? { primary: agent.model as string } : undefined,
+        identity: (agent.identityName && agent.identityEmoji)
+          ? {
+              name: (agent.identityName as string).replace(/[\p{Emoji}\s]/gu, '').trim() || name,
+              emoji: (agent.identityEmoji as string).trim() || undefined,
+            }
+          : undefined,
+        channels: [],
+        skills: Array.isArray(agent.skills) ? agent.skills.map(String) : undefined,
+        cronJobs: Array.isArray(agent.cronJobs) ? agent.cronJobs.map((cj: Record<string, unknown>) => ({
+          id: String(cj.id),
+          cron: String(cj.cron),
+          message: String(cj.message),
+          channel: cj.channel ? String(cj.channel) : undefined,
+        })) : undefined,
       },
     };
 
     if (options.apply) {
-      config.agents[agent.name] = agentConfig;
+      config.agents[name] = agentConfig;
     }
 
-    result.imported.push(agent.name);
+    result.imported.push(name);
   }
 
   if (options.apply && result.imported.length > 0) {

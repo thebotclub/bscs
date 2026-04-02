@@ -237,9 +237,9 @@ describe('Core Fleet Module', () => {
       const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
 
       const mockAgents = [
-        { name: 'bot-alpha', workspace: 'alpha-ws', model: 'gpt-4', channels: [{ type: 'telegram', accountId: 'tg123' }] },
-        { name: 'bot-beta', workspace: 'beta-ws', model: 'claude-3', channels: [] },
-        { name: 'bot-gamma' },
+        { id: 'bot-alpha', workspace: 'alpha-ws', model: 'gpt-4', identityName: 'Alpha', identityEmoji: 'A' },
+        { id: 'bot-beta', workspace: 'beta-ws', model: 'claude-3' },
+        { id: 'bot-gamma' },
       ];
 
       setExecCommandForFleet((() => JSON.stringify(mockAgents)) as any);
@@ -254,7 +254,7 @@ describe('Core Fleet Module', () => {
       expect(config.agents!['bot-alpha']).toBeDefined();
       expect(config.agents!['bot-alpha']!.runtime).toBe('openclaw');
       expect(config.agents!['bot-alpha']!.openclaw?.gatewayUrl).toBe('http://localhost:18777');
-      expect(config.agents!['bot-alpha']!.openclaw?.channels).toHaveLength(1);
+      expect(config.agents!['bot-alpha']!.openclaw?.identity?.name).toBe('Alpha');
       expect(config.agents!['bot-beta']!.openclaw?.workspace).toBe('beta-ws');
       expect(config.agents!['bot-gamma']!.openclaw?.workspace).toBe('bot-gamma');
     });
@@ -270,8 +270,8 @@ describe('Core Fleet Module', () => {
       const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
 
       const mockAgents = [
-        { name: 'existing' },
-        { name: 'new-agent' },
+        { id: 'existing' },
+        { id: 'new-agent' },
       ];
 
       setExecCommandForFleet((() => JSON.stringify(mockAgents)) as any);
@@ -296,7 +296,7 @@ describe('Core Fleet Module', () => {
 
       const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
 
-      const mockAgents = [{ name: 'test-agent' }];
+      const mockAgents = [{ id: 'test-agent' }];
       setExecCommandForFleet((() => JSON.stringify(mockAgents)) as any);
 
       const result = importFromOpenClaw('http://localhost:18777'); // no apply
