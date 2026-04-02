@@ -710,7 +710,7 @@ export function importFromOpenClaw(
         identity: (agent.identityName && agent.identityEmoji)
           ? {
               name: (agent.identityName as string).replace(/[\p{Emoji}\s]/gu, '').trim() || name,
-              emoji: (agent.identityEmoji as string).trim() || undefined,
+              emoji: (agent.identityEmoji as string).trim(),
             }
           : undefined,
         channels: [],

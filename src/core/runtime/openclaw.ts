@@ -144,7 +144,7 @@ export class OpenClawRuntime implements OpenClawAgentRuntime {
       const agents = JSON.parse(output);
       if (!Array.isArray(agents)) return [];
       return agents.map((a: { id: string; name?: string; enabled?: boolean }) => ({
-        name: a.id || a.name,
+        name: a.id || a.name || 'unknown',
         status: (a.enabled !== false ? 'running' : 'stopped') as RuntimeStatus['status'],
       }));
     } catch {
