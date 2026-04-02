@@ -1,5 +1,5 @@
 {
-  "name": "@botsquad/bscs",
+  "name": "@the-bot-club/bscs",
   "version": "0.1.0",
   "description": "Bot Squad Command Suite — CLI for managing fleets of OpenClaw AI agents",
   "type": "module",

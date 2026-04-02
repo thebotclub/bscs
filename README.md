@@ -1,4 +1,4 @@
-# @botsquad/bscs
+# @the-bot-club/bscs
 
 **Bot Squad Command Suite** — CLI for managing fleets of AI coding agents across Docker containers, remote machines, and LLM providers.
 
@@ -13,7 +13,7 @@
 ```
 
 [![CI](https://github.com/thebotclub/bscs/actions/workflows/ci.yml/badge.svg)](https://github.com/thebotclub/bscs/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/npm/v/@botsquad/bscs)](https://www.npmjs.com/package/@botsquad/bscs)
+[![npm version](https://img.shields.io/npm/v/@the-bot-club/bscs)](https://www.npmjs.com/package/@the-bot-club/bscs)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
 
@@ -35,7 +35,7 @@ BSCS lets you spin up, monitor, and orchestrate fleets of AI agents — each run
 ## Installation
 
 ```bash
-npm install -g @botsquad/bscs
+npm install -g @the-bot-club/bscs
 ```
 
 Or run from source:
