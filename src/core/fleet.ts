@@ -211,11 +211,9 @@ export async function getFleetStatus(includeAll = true): Promise<FleetStatusResu
         const gwPort = agentConfig.ports?.gateway || 18789;
         if (isLocal) {
           try {
-            const res = execFileSync('curl', ['-s', '--max-time', '2', `http://127.0.0.1:${gwPort}/healthz`], {
-              encoding: 'utf8',
-              timeout: 5000,
-            });
-            status = res.includes('"ok"') || res.includes('"live"') ? 'running' : 'stopped';
+            const nativeRuntime = getRuntime('native', { port: gwPort });
+            const runtimeStatus = await nativeRuntime.status(name);
+            status = runtimeStatus.status === 'running' ? 'running' : 'stopped';
           } catch {
             status = 'stopped';
           }
@@ -234,16 +232,12 @@ export async function getFleetStatus(includeAll = true): Promise<FleetStatusResu
         }
         ports = { gateway: agentConfig.ports?.gateway };
       } else if (runtime === 'openclaw') {
-        // OpenClaw agents — check gateway health
+        // OpenClaw agents — check gateway health via async runtime
         const gatewayUrl = agentConfig.openclaw?.gatewayUrl || `http://127.0.0.1:${agentConfig.ports?.gateway || 18777}`;
         try {
-          const res = execFileSync('curl', ['-s', '--max-time', '3', `${gatewayUrl}/healthz`], {
-            encoding: 'utf8',
-            timeout: 5000,
-          });
-          status = (res.includes('"ok"') || res.includes('"live"') || res.includes('<!doctype') || res.includes('openclaw-app'))
-            ? 'running'
-            : 'stopped';
+          const ocRuntime = getRuntime('openclaw', { gatewayUrl });
+          const runtimeStatus = await ocRuntime.status(name);
+          status = runtimeStatus.status === 'running' ? 'running' : 'stopped';
         } catch {
           status = 'stopped';
         }
