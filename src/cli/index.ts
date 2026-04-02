@@ -10,6 +10,7 @@ import { createSecretsCommand } from './secrets/index.js';
 import { createCostCommand } from './cost/index.js';
 import { createSecurityCommand } from './security/index.js';
 import { createMcpCommand } from './mcp/index.js';
+import { createGatewayCommand } from './gateway/index.js';
 
 // Version is embedded at build time — do NOT replace with a runtime package.json read.
 const VERSION = '0.1.0';
@@ -79,6 +80,7 @@ Documentation: https://github.com/thebotclub/bscs
   // Phase 5 commands
   program.addCommand(createSecurityCommand());
   program.addCommand(createMcpCommand());
+  program.addCommand(createGatewayCommand());
 
   return program;
 }
@@ -94,3 +96,4 @@ export { createSecretsCommand };
 export { createCostCommand };
 export { createSecurityCommand };
 export { createMcpCommand };
+export { createGatewayCommand };

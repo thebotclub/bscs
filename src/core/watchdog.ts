@@ -163,4 +163,65 @@ export function resetRestartCounts(name?: string): void {
   }
 }
 
+// ── Daemon Loop ──────────────────────────────────────────────────────
+
+let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+
+export interface WatchdogDaemon {
+  running: boolean;
+  stop: () => void;
+}
+
+/**
+ * Start the watchdog daemon loop.
+ * Runs checkHealth + restartUnhealthy on a configurable interval.
+ */
+export function startWatchdogDaemon(
+  config: WatchdogConfig = DEFAULT_WATCHDOG_CONFIG,
+  onCycle?: (results: HealthCheckResult[]) => void,
+): WatchdogDaemon {
+  if (watchdogTimer) {
+    logger.warn('Watchdog daemon already running');
+    return { running: true, stop: () => stopWatchdogDaemon() };
+  }
+
+  logger.info({ interval: config.interval }, 'Starting watchdog daemon');
+
+  const runCycle = async () => {
+    try {
+      const health = await checkHealth();
+      const unhealthy = health.filter((h) => h.restartNeeded);
+
+      if (unhealthy.length > 0) {
+        logger.warn({ unhealthy: unhealthy.length }, 'Unhealthy agents detected');
+        await restartUnhealthy(config);
+      }
+
+      onCycle?.(health);
+    } catch (err) {
+      logger.error({ err }, 'Watchdog cycle error');
+    }
+  };
+
+  // Run immediately, then on interval
+  runCycle();
+  watchdogTimer = setInterval(runCycle, config.interval * 1000);
+
+  return {
+    running: true,
+    stop: () => stopWatchdogDaemon(),
+  };
+}
+
+/**
+ * Stop the watchdog daemon loop.
+ */
+export function stopWatchdogDaemon(): void {
+  if (watchdogTimer) {
+    clearInterval(watchdogTimer);
+    watchdogTimer = null;
+    logger.info('Watchdog daemon stopped');
+  }
+}
+
 export { DEFAULT_WATCHDOG_CONFIG };

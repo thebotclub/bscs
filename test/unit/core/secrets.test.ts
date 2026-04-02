@@ -1,9 +1,32 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync, mkdirSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { listSecrets, checkSecretsHealth, syncSecrets } from '../../../src/core/secrets.js';
 import { loadConfig, saveConfig } from '../../../src/core/config.js';
+
+// Mock resolveSecret to avoid calling real `op` CLI
+vi.mock('../../../src/core/secrets.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/core/secrets.js')>();
+  return {
+    ...actual,
+    // Keep all exports, but override resolveSecret
+  };
+});
+
+// Intercept execFileSync to avoid real `op` calls
+vi.mock('child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('child_process')>();
+  return {
+    ...actual,
+    execFileSync: (cmd: string, ...args: unknown[]) => {
+      if (cmd === 'op') {
+        throw new Error('op CLI mocked in tests');
+      }
+      return actual.execFileSync(cmd, ...args as Parameters<typeof actual.execFileSync> extends [unknown, ...infer R] ? R : never);
+    },
+  };
+});
 
 describe('Core Secrets Module', () => {
   let tempDir: string;

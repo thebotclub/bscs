@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, appendFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { createLogger } from '../util/logger.js';
@@ -10,9 +10,11 @@ const logger = createLogger('cost');
 // Cost Tracking
 // =============================================================================
 
-const COST_DATA_DIR = process.env.BSCS_COST_DIR 
-  ? `${process.env.BSCS_COST_DIR}/costs`
-  : `${homedir()}/.config/bscs/costs`;
+function getCostDataDir(): string {
+  return process.env.BSCS_COST_DIR 
+    ? `${process.env.BSCS_COST_DIR}/costs`
+    : `${homedir()}/.config/bscs/costs`;
+}
 
 interface CostEntry {
   timestamp: string;
@@ -35,6 +37,22 @@ interface CostReport {
 }
 
 /**
+ * Record a cost entry to the daily JSONL file
+ */
+export function recordCostEntry(entry: CostEntry): void {
+  const costDir = getCostDataDir();
+  if (!existsSync(costDir)) {
+    mkdirSync(costDir, { recursive: true });
+  }
+
+  const date = entry.timestamp.slice(0, 10); // YYYY-MM-DD
+  const filePath = join(costDir, `${date}.jsonl`);
+
+  appendFileSync(filePath, JSON.stringify(entry) + '\n', 'utf-8');
+  logger.debug({ agent: entry.agent, model: entry.model, cost: entry.cost }, 'Cost entry recorded');
+}
+
+/**
  * Get cost data for a period
  */
 export function getCostData(period: string): CostEntry[] {
@@ -42,12 +60,12 @@ export function getCostData(period: string): CostEntry[] {
   const today = new Date();
 
   // Ensure cost directory exists
-  if (!existsSync(COST_DATA_DIR)) {
-    mkdirSync(COST_DATA_DIR, { recursive: true });
+  if (!existsSync(getCostDataDir())) {
+    mkdirSync(getCostDataDir(), { recursive: true });
     return entries;
   }
 
-  const files = readdirSync(COST_DATA_DIR)
+  const files = readdirSync(getCostDataDir())
     .filter((f) => f.endsWith('.jsonl'))
     .sort()
     .reverse();
@@ -77,7 +95,7 @@ export function getCostData(period: string): CostEntry[] {
     const fileDate = file.slice(0, 10);
     if (fileDate >= startStr && fileDate <= endStr) {
       try {
-        const content = readFileSync(join(COST_DATA_DIR, file), 'utf-8');
+        const content = readFileSync(join(getCostDataDir(), file), 'utf-8');
         const lines = content.trim().split('\n');
         for (const line of lines) {
           if (!line) continue;
