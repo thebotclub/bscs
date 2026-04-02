@@ -11,11 +11,10 @@ import { loadConfig, saveConfig } from './config.js';
 import { sshExec } from '../util/ssh.js';
 import type { AgentConfig } from '../util/types.js';
 import {
-  listBscsContainers,
   listAllContainers,
   type ContainerInfo,
 } from './docker.js';
-import { getRuntime, isOpenClawRuntime } from './runtime/index.js';
+import { getRuntime, isOpenClawRuntime, buildContainerNamesFromConfig } from './runtime/index.js';
 import { createLogger } from '../util/logger.js';
 
 const logger = createLogger('fleet');
@@ -124,14 +123,33 @@ export interface InitAnswers {
 export async function getFleetStatus(includeAll = true): Promise<FleetStatusResult> {
   const config = loadConfig();
 
-  // Get local Docker containers
+  // Build container name mappings from config
+  const containerNames = buildContainerNamesFromConfig(config.agents);
+
+  // Get local Docker containers (all of them — filtering is done below)
   let localContainers: ContainerInfo[] = [];
   try {
-    localContainers = await listBscsContainers();
+    localContainers = await listAllContainers();
   } catch (err) {
     logger.warn({ err }, 'Could not list local Docker containers');
   }
-  const localContainerMap = new Map(localContainers.map((c) => [c.name.replace('openclaw_', ''), c]));
+
+  // Build a map: agentName -> ContainerInfo
+  // Matches openclaw_-prefixed containers OR custom-named containers from config
+  const localContainerMap = new Map<string, ContainerInfo>();
+  for (const c of localContainers) {
+    // Standard openclaw_ prefix
+    if (c.name.startsWith('openclaw_')) {
+      const agentName = c.name.replace('openclaw_', '');
+      localContainerMap.set(agentName, c);
+    }
+    // Custom container names registered in config
+    for (const [agentName, containerName] of containerNames) {
+      if (c.name === containerName) {
+        localContainerMap.set(agentName, c);
+      }
+    }
+  }
 
   // Group agents by machine
   const machineAgents = new Map<string, Array<{ name: string; agentConfig: AgentConfig }>>();
@@ -320,7 +338,8 @@ export async function computeReconcileChanges(): Promise<ReconcileChange[]> {
   const changes: ReconcileChange[] = [];
 
   // Docker agents — batch container comparison
-  const dockerRuntime = getRuntime('docker');
+  const containerNames = buildContainerNamesFromConfig(config.agents);
+  const dockerRuntime = getRuntime('docker', { containerNames });
   let containerStatuses: Array<{ name: string; status: string }> = [];
   try {
     containerStatuses = await dockerRuntime.list();

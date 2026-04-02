@@ -7,6 +7,7 @@ import { loadConfig, saveConfig } from '../../../src/core/config.js';
 // Mock docker
 vi.mock('../../../src/core/docker.js', () => ({
   listBscsContainers: vi.fn().mockResolvedValue([]),
+  listAllContainers: vi.fn().mockResolvedValue([]),
   pullImage: vi.fn().mockResolvedValue(undefined),
   createContainer: vi.fn().mockResolvedValue({ id: 'c123' }),
   startContainer: vi.fn().mockResolvedValue(undefined),
@@ -69,6 +70,7 @@ vi.mock('../../../src/core/runtime/index.js', () => ({
   isOpenClawRuntime: vi.fn((runtime: unknown) =>
     runtime != null && typeof runtime === 'object' && 'bindChannel' in runtime && 'unbindChannel' in runtime && 'setConfig' in runtime,
   ),
+  buildContainerNamesFromConfig: vi.fn(() => new Map()),
 }));
 
 describe('Core Fleet Module', () => {
@@ -121,8 +123,8 @@ describe('Core Fleet Module', () => {
 
     it('should compute summary correctly', async () => {
       const { getFleetStatus } = await import('../../../src/core/fleet.js');
-      const { listBscsContainers } = await import('../../../src/core/docker.js');
-      vi.mocked(listBscsContainers).mockResolvedValue([
+      const { listAllContainers } = await import('../../../src/core/docker.js');
+      vi.mocked(listAllContainers).mockResolvedValue([
         { id: 'c1', name: 'openclaw_agent-aa', image: 'test', status: 'running', ports: { gateway: 19000, remote: 19001 } },
         { id: 'c2', name: 'openclaw_agent-bb', image: 'test', status: 'stopped', ports: { gateway: 19002, remote: 19003 } },
       ]);

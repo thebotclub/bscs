@@ -15,14 +15,14 @@ export { OpenClawRuntime } from './openclaw.js';
 interface RuntimeOpts {
   port?: number;
   gatewayUrl?: string;
+  /** Map of agent name -> Docker container name for custom-named containers. */
   containerNames?: Map<string, string>;
 }
 
 export function getRuntime(runtimeType?: string, opts?: RuntimeOpts): AgentRuntime {
   switch (runtimeType || 'docker') {
     case 'docker': {
-      const dr = new DockerRuntime(opts?.containerNames);
-      return dr;
+      return new DockerRuntime(opts?.containerNames);
     }
     case 'native':
       return new NativeRuntime(opts?.port);
@@ -31,4 +31,21 @@ export function getRuntime(runtimeType?: string, opts?: RuntimeOpts): AgentRunti
     default:
       throw new Error(`Unknown runtime: "${runtimeType}". Supported: docker, native, openclaw`);
   }
+}
+
+/**
+ * Build container name mappings from BSCS config.
+ * Scans all agents with runtime='docker' and a `container` field.
+ */
+export function buildContainerNamesFromConfig(
+  agents: Record<string, { runtime?: string; container?: string }> | undefined,
+): Map<string, string> {
+  const map = new Map<string, string>();
+  if (!agents) return map;
+  for (const [name, agentConfig] of Object.entries(agents)) {
+    if (agentConfig.runtime === 'docker' && agentConfig.container) {
+      map.set(name, agentConfig.container);
+    }
+  }
+  return map;
 }

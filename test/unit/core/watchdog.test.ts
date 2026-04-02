@@ -7,6 +7,7 @@ import { loadConfig, saveConfig } from '../../../src/core/config.js';
 // Mock docker
 vi.mock('../../../src/core/docker.js', () => ({
   listBscsContainers: vi.fn().mockResolvedValue([]),
+  listAllContainers: vi.fn().mockResolvedValue([]),
   startContainer: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -64,6 +65,7 @@ vi.mock('../../../src/core/runtime/index.js', () => ({
       isAvailable: vi.fn().mockResolvedValue(true),
     };
   }),
+  buildContainerNamesFromConfig: vi.fn(() => new Map()),
 }));
 
 describe('Core Watchdog Module', () => {

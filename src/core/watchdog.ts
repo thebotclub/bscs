@@ -2,7 +2,7 @@
  * Core watchdog module — agent health monitoring and restart logic.
  * Dispatches through runtime interface for multi-runtime support.
  */
-import { getRuntime } from './runtime/index.js';
+import { getRuntime, buildContainerNamesFromConfig } from './runtime/index.js';
 import { loadConfig } from './config.js';
 import { createLogger } from '../util/logger.js';
 
@@ -63,7 +63,8 @@ export async function checkHealth(): Promise<HealthCheckResult[]> {
 
   // Docker agents — batch query via list() then match (efficient)
   if (dockerAgents.length > 0) {
-    const dockerRuntime = getRuntime('docker');
+    const containerNames = buildContainerNamesFromConfig(agents);
+    const dockerRuntime = getRuntime('docker', { containerNames });
     let containerStatuses: Array<{ name: string; status: string }> = [];
     try {
       containerStatuses = await dockerRuntime.list();
