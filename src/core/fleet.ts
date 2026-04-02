@@ -14,7 +14,7 @@ import {
   listBscsContainers,
   type ContainerInfo,
 } from './docker.js';
-import { getRuntime } from './runtime/index.js';
+import { getRuntime, isOpenClawRuntime } from './runtime/index.js';
 import { createLogger } from '../util/logger.js';
 
 const logger = createLogger('fleet');
@@ -357,7 +357,7 @@ export async function computeReconcileChanges(): Promise<ReconcileChange[]> {
           changes.push({ action: 'start', agent: name, reason: 'Health probe failed' });
         }
       } else if (runtime === 'openclaw') {
-        // OpenClaw agents — check gateway reachability
+        // OpenClaw agents — check gateway reachability + config drift
         try {
           const ocRuntime = getRuntime('openclaw', {
             port: agentConfig.ports?.gateway,
@@ -367,9 +367,57 @@ export async function computeReconcileChanges(): Promise<ReconcileChange[]> {
           if (agentConfig.status === 'running' && status.status !== 'running') {
             changes.push({ action: 'start', agent: name, reason: 'OpenClaw agent not responding' });
           }
+
+          // Config drift detection via gateway query
+          if (isOpenClawRuntime(ocRuntime)) {
+            const liveAgents = await ocRuntime.listAgents();
+            const liveAgent = liveAgents.find((a) => a.name === name);
+            if (liveAgent) {
+              // Channel binding mismatch
+              const configChannels = (agentConfig.openclaw?.channels || []) as Array<{ type: string; accountId: string }>;
+              const liveChannels = liveAgent.channels || [];
+              const configSet = new Set(configChannels.map((c) => `${c.type}:${c.accountId}`));
+              const liveSet = new Set(liveChannels.map((c) => `${c.type}:${c.accountId}`));
+              if (configSet.size !== liveSet.size || [...configSet].some((k) => !liveSet.has(k))) {
+                changes.push({ action: 'rebind', agent: name, reason: 'Channel binding mismatch' });
+              }
+
+              // Model drift
+              const configModel = agentConfig.openclaw?.model?.primary;
+              if (configModel && liveAgent.model && configModel.toLowerCase() !== liveAgent.model.toLowerCase()) {
+                changes.push({ action: 'config-update', agent: name, reason: `Model drift: config=${configModel}, gateway=${liveAgent.model}` });
+              }
+            }
+          }
         } catch {
           changes.push({ action: 'start', agent: name, reason: 'Gateway probe failed' });
         }
+      }
+    }
+  }
+
+  // Orphaned OpenClaw agents (in gateway but not in BSCS config)
+  if (config.agents) {
+    const openclawGateways = new Set<string>();
+    for (const agentConfig of Object.values(config.agents)) {
+      if (agentConfig.runtime === 'openclaw' && agentConfig.openclaw?.gatewayUrl) {
+        openclawGateways.add(agentConfig.openclaw.gatewayUrl);
+      }
+    }
+    for (const gatewayUrl of openclawGateways) {
+      try {
+        const ocRuntime = getRuntime('openclaw', { gatewayUrl });
+        if (isOpenClawRuntime(ocRuntime)) {
+          const liveAgents = await ocRuntime.listAgents();
+          const configNames = new Set(Object.keys(config.agents));
+          for (const live of liveAgents) {
+            if (!configNames.has(live.name)) {
+              changes.push({ action: 'orphaned', agent: live.name, reason: `In gateway ${gatewayUrl} but not in BSCS config` });
+            }
+          }
+        }
+      } catch {
+        // Gateway unreachable — skip orphan check
       }
     }
   }
@@ -410,6 +458,26 @@ export async function applyReconcileChange(
       await runtime.stop(change.agent);
     } else if (change.action === 'remove') {
       await runtime.destroy(change.agent);
+    } else if (change.action === 'rebind' && isOpenClawRuntime(runtime)) {
+      // Unbind all live channels, then rebind from config
+      const channels = (agentConfig?.openclaw?.channels || []) as Array<{ type: string; accountId: string }>;
+      // Query live channels to unbind exactly what exists
+      const liveAgents = await runtime.listAgents();
+      const liveAgent = liveAgents.find((a) => a.name === change.agent);
+      for (const ch of liveAgent?.channels || []) {
+        try { await runtime.unbindChannel(change.agent, ch.type); } catch { /* ignore */ }
+      }
+      for (const ch of channels) {
+        await runtime.bindChannel(change.agent, ch.type, ch.accountId);
+      }
+    } else if (change.action === 'config-update' && isOpenClawRuntime(runtime)) {
+      const model = agentConfig?.openclaw?.model?.primary;
+      if (model) {
+        await runtime.setConfig(`agent.${change.agent}.model`, model);
+      }
+    } else if (change.action === 'orphaned') {
+      // Orphaned agents are reported but not auto-deleted
+      logger.warn({ agent: change.agent }, 'Orphaned agent detected — manual cleanup required');
     }
     return { success: true };
   } catch (err) {

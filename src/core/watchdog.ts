@@ -170,9 +170,10 @@ export async function restartUnhealthy(
   const healthChecks = await checkHealth();
   const now = Date.now();
 
-  // Separate openclaw agents from others for gateway-aware restart logic
+  // Separate openclaw agents into gateway-down vs agent-only-down
   const unhealthy = healthChecks.filter((c) => c.restartNeeded);
-  const gatewayAgents = new Map<string, string[]>(); // gatewayUrl → agent names
+  const gatewayAgents = new Map<string, string[]>(); // gatewayUrl → agent names (gateway down)
+  const agentOnlyUnhealthy: typeof unhealthy = []; // openclaw agents where gateway is up but agent is down
   const nonGatewayUnhealthy: typeof unhealthy = [];
 
   for (const check of unhealthy) {
@@ -180,9 +181,15 @@ export async function restartUnhealthy(
     const runtimeType = agentConfig?.runtime || 'docker';
     const gw = runtimeType === 'openclaw' ? agentConfig?.openclaw?.gatewayUrl : undefined;
     if (gw) {
-      const list = gatewayAgents.get(gw) || [];
-      list.push(check.name);
-      gatewayAgents.set(gw, list);
+      // Distinguish gateway-down from agent-only-down
+      if (check.containerStatus === 'gateway-down') {
+        const list = gatewayAgents.get(gw) || [];
+        list.push(check.name);
+        gatewayAgents.set(gw, list);
+      } else {
+        // Gateway is up but this specific agent is unhealthy
+        agentOnlyUnhealthy.push(check);
+      }
     } else {
       nonGatewayUnhealthy.push(check);
     }
@@ -238,6 +245,47 @@ export async function restartUnhealthy(
     }
   }
 
+  // Per-agent restart for openclaw agents on healthy gateways
+  for (const check of agentOnlyUnhealthy) {
+    const agentConfig = config.agents?.[check.name];
+    const agentKey = `agent:${check.name}`;
+
+    if (restartInFlight.has(agentKey)) {
+      results.push({ name: check.name, restarted: false, error: 'Restart already in progress' });
+      continue;
+    }
+
+    const tracker = restartCounts.get(agentKey) || { count: 0, lastRestart: 0 };
+
+    if (now - tracker.lastRestart < watchdogConfig.cooldownMs) {
+      results.push({ name: check.name, restarted: false, error: 'In cooldown period' });
+      continue;
+    }
+
+    if (tracker.count >= watchdogConfig.maxRestarts) {
+      results.push({ name: check.name, restarted: false, error: `Max restarts (${watchdogConfig.maxRestarts}) exceeded` });
+      continue;
+    }
+
+    restartInFlight.add(agentKey);
+    try {
+      const runtime = getRuntime('openclaw', {
+        gatewayUrl: agentConfig?.openclaw?.gatewayUrl,
+      });
+      // Re-enable this specific agent
+      await runtime.start(check.name);
+      restartCounts.set(agentKey, { count: tracker.count + 1, lastRestart: now });
+      logger.info({ name: check.name, attempt: tracker.count + 1 }, 'OpenClaw agent re-enabled');
+      results.push({ name: check.name, restarted: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ name: check.name, err }, 'Failed to re-enable OpenClaw agent');
+      results.push({ name: check.name, restarted: false, error: message });
+    } finally {
+      restartInFlight.delete(agentKey);
+    }
+  }
+
   // Non-gateway (docker/native) agents — per-agent restart
   for (const check of nonGatewayUnhealthy) {
     // Prevent concurrent restart of the same agent
@@ -287,7 +335,9 @@ export async function restartUnhealthy(
 export function resetRestartCounts(name?: string): void {
   if (name) {
     restartCounts.delete(name);
+    restartCounts.delete(`agent:${name}`);
     restartInFlight.delete(name);
+    restartInFlight.delete(`agent:${name}`);
   } else {
     restartCounts.clear();
     restartInFlight.clear();

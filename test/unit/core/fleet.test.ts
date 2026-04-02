@@ -14,6 +14,63 @@ vi.mock('../../../src/core/docker.js', () => ({
   removeContainer: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Mock runtime module for OpenClaw drift detection tests
+const mockListAgents = vi.fn().mockResolvedValue([]);
+const mockBindChannel = vi.fn().mockResolvedValue(undefined);
+const mockUnbindChannel = vi.fn().mockResolvedValue(undefined);
+const mockSetConfig = vi.fn().mockResolvedValue(undefined);
+const mockOcRuntime = {
+  list: vi.fn().mockResolvedValue([]),
+  start: vi.fn().mockResolvedValue(undefined),
+  stop: vi.fn().mockResolvedValue(undefined),
+  restart: vi.fn().mockResolvedValue(undefined),
+  create: vi.fn().mockResolvedValue(undefined),
+  destroy: vi.fn().mockResolvedValue(undefined),
+  status: vi.fn().mockResolvedValue({ name: 'test', status: 'running' }),
+  healthCheck: vi.fn(),
+  logs: vi.fn(),
+  shell: vi.fn(),
+  isAvailable: vi.fn().mockResolvedValue(true),
+  // OpenClaw-specific — these make isOpenClawRuntime() return true
+  bindChannel: mockBindChannel,
+  unbindChannel: mockUnbindChannel,
+  setConfig: mockSetConfig,
+  listAgents: mockListAgents,
+  restartGateway: vi.fn().mockResolvedValue(undefined),
+};
+
+vi.mock('../../../src/core/runtime/index.js', () => ({
+  getRuntime: vi.fn((type: string) => {
+    if (type === 'openclaw') return mockOcRuntime;
+    // Docker runtime: delegate to mocked docker module
+    return {
+      list: async () => {
+        const { listBscsContainers } = await import('../../../src/core/docker.js');
+        return (await listBscsContainers()).map((c: { name: string; status: string }) => ({
+          name: c.name.replace('openclaw_', ''),
+          status: c.status,
+        }));
+      },
+      start: async (name: string) => {
+        const { startContainer } = await import('../../../src/core/docker.js');
+        return startContainer(name);
+      },
+      stop: vi.fn(),
+      restart: vi.fn(),
+      create: vi.fn(),
+      destroy: vi.fn(),
+      status: vi.fn(),
+      healthCheck: vi.fn(),
+      logs: vi.fn(),
+      shell: vi.fn(),
+      isAvailable: vi.fn().mockResolvedValue(true),
+    };
+  }),
+  isOpenClawRuntime: vi.fn((runtime: unknown) =>
+    runtime != null && typeof runtime === 'object' && 'bindChannel' in runtime && 'unbindChannel' in runtime && 'setConfig' in runtime,
+  ),
+}));
+
 describe('Core Fleet Module', () => {
   let tempDir: string;
   let originalConfigDir: string | undefined;
@@ -248,6 +305,199 @@ describe('Core Fleet Module', () => {
       // Verify config was NOT written
       const config = loadConfig();
       expect(config.agents!['test-agent']).toBeUndefined();
+    });
+  });
+
+  describe('reconciliation config drift (OpenClaw)', () => {
+    it('should detect channel binding mismatch', async () => {
+      const { computeReconcileChanges } = await import('../../../src/core/fleet.js');
+
+      const gwUrl = 'http://oc.test:18777';
+      saveConfig({
+        version: '1.0',
+        agents: {
+          'drift-agent': {
+            name: 'drift-agent',
+            status: 'running',
+            runtime: 'openclaw',
+            openclaw: {
+              gatewayUrl: gwUrl,
+              channels: [{ type: 'telegram', accountId: 'tg1' }],
+            },
+          },
+        },
+      });
+
+      // Gateway says agent is running but channels differ
+      mockOcRuntime.status.mockResolvedValueOnce({ name: 'drift-agent', status: 'running' });
+      mockListAgents
+        .mockResolvedValueOnce([{ name: 'drift-agent', enabled: true, channels: [{ type: 'discord', accountId: 'dc1' }] }])
+        // Second call for orphan check on same gateway
+        .mockResolvedValueOnce([{ name: 'drift-agent', enabled: true }]);
+
+      const changes = await computeReconcileChanges();
+      const rebind = changes.find((c) => c.action === 'rebind');
+      expect(rebind).toBeDefined();
+      expect(rebind!.agent).toBe('drift-agent');
+      expect(rebind!.reason).toContain('Channel binding mismatch');
+    });
+
+    it('should detect model drift', async () => {
+      const { computeReconcileChanges } = await import('../../../src/core/fleet.js');
+
+      const gwUrl = 'http://oc.test:18777';
+      saveConfig({
+        version: '1.0',
+        agents: {
+          'model-agent': {
+            name: 'model-agent',
+            status: 'running',
+            runtime: 'openclaw',
+            openclaw: {
+              gatewayUrl: gwUrl,
+              model: { primary: 'gpt-4' },
+            },
+          },
+        },
+      });
+
+      mockOcRuntime.status.mockResolvedValueOnce({ name: 'model-agent', status: 'running' });
+      mockListAgents
+        .mockResolvedValueOnce([{ name: 'model-agent', enabled: true, model: 'claude-3' }])
+        .mockResolvedValueOnce([{ name: 'model-agent', enabled: true }]);
+
+      const changes = await computeReconcileChanges();
+      const configUpdate = changes.find((c) => c.action === 'config-update');
+      expect(configUpdate).toBeDefined();
+      expect(configUpdate!.agent).toBe('model-agent');
+      expect(configUpdate!.reason).toContain('Model drift');
+    });
+
+    it('should not flag model drift when case matches', async () => {
+      const { computeReconcileChanges } = await import('../../../src/core/fleet.js');
+
+      const gwUrl = 'http://oc.test:18777';
+      saveConfig({
+        version: '1.0',
+        agents: {
+          'same-model': {
+            name: 'same-model',
+            status: 'running',
+            runtime: 'openclaw',
+            openclaw: {
+              gatewayUrl: gwUrl,
+              model: { primary: 'GPT-4' },
+            },
+          },
+        },
+      });
+
+      mockOcRuntime.status.mockResolvedValueOnce({ name: 'same-model', status: 'running' });
+      mockListAgents
+        .mockResolvedValueOnce([{ name: 'same-model', enabled: true, model: 'gpt-4' }])
+        .mockResolvedValueOnce([{ name: 'same-model', enabled: true }]);
+
+      const changes = await computeReconcileChanges();
+      expect(changes.filter((c) => c.action === 'config-update')).toHaveLength(0);
+    });
+
+    it('should detect orphaned agents in gateway', async () => {
+      const { computeReconcileChanges } = await import('../../../src/core/fleet.js');
+
+      const gwUrl = 'http://oc.test:18777';
+      saveConfig({
+        version: '1.0',
+        agents: {
+          'known-agent': {
+            name: 'known-agent',
+            status: 'running',
+            runtime: 'openclaw',
+            openclaw: { gatewayUrl: gwUrl },
+          },
+        },
+      });
+
+      mockOcRuntime.status.mockResolvedValueOnce({ name: 'known-agent', status: 'running' });
+      // Per-agent listAgents call (no drift)
+      mockListAgents.mockResolvedValueOnce([{ name: 'known-agent', enabled: true }]);
+      // Orphan check call — gateway has an extra agent
+      mockListAgents.mockResolvedValueOnce([
+        { name: 'known-agent', enabled: true },
+        { name: 'rogue-agent', enabled: true },
+      ]);
+
+      const changes = await computeReconcileChanges();
+      const orphaned = changes.find((c) => c.action === 'orphaned');
+      expect(orphaned).toBeDefined();
+      expect(orphaned!.agent).toBe('rogue-agent');
+      expect(orphaned!.reason).toContain('not in BSCS config');
+    });
+  });
+
+  describe('applyReconcileChange (OpenClaw drift actions)', () => {
+    it('should rebind channels by querying live state first', async () => {
+      const { applyReconcileChange } = await import('../../../src/core/fleet.js');
+
+      saveConfig({
+        version: '1.0',
+        agents: {
+          'rebind-agent': {
+            name: 'rebind-agent',
+            status: 'running',
+            runtime: 'openclaw',
+            openclaw: {
+              gatewayUrl: 'http://oc.test:18777',
+              channels: [{ type: 'telegram', accountId: 'tg1' }],
+            },
+          },
+        },
+      });
+
+      // Live agent has discord bound — should be unbound first
+      mockListAgents.mockResolvedValueOnce([
+        { name: 'rebind-agent', enabled: true, channels: [{ type: 'discord', accountId: 'dc1' }] },
+      ]);
+
+      const result = await applyReconcileChange({ action: 'rebind', agent: 'rebind-agent', reason: 'Channel mismatch' });
+      expect(result.success).toBe(true);
+      // Should unbind the live discord channel
+      expect(mockUnbindChannel).toHaveBeenCalledWith('rebind-agent', 'discord');
+      // Should rebind the config telegram channel
+      expect(mockBindChannel).toHaveBeenCalledWith('rebind-agent', 'telegram', 'tg1');
+    });
+
+    it('should apply config-update for model drift', async () => {
+      const { applyReconcileChange } = await import('../../../src/core/fleet.js');
+
+      saveConfig({
+        version: '1.0',
+        agents: {
+          'model-fix': {
+            name: 'model-fix',
+            status: 'running',
+            runtime: 'openclaw',
+            openclaw: {
+              gatewayUrl: 'http://oc.test:18777',
+              model: { primary: 'gpt-4' },
+            },
+          },
+        },
+      });
+
+      const result = await applyReconcileChange({ action: 'config-update', agent: 'model-fix', reason: 'Model drift' });
+      expect(result.success).toBe(true);
+      expect(mockSetConfig).toHaveBeenCalledWith('agent.model-fix.model', 'gpt-4');
+    });
+
+    it('should handle orphaned action without auto-delete', async () => {
+      const { applyReconcileChange } = await import('../../../src/core/fleet.js');
+
+      saveConfig({ version: '1.0', agents: {} });
+
+      const result = await applyReconcileChange({ action: 'orphaned', agent: 'rogue', reason: 'Not in config' });
+      expect(result.success).toBe(true);
+      // No destroy call — orphaned agents are warning-only
+      expect(mockOcRuntime.destroy).not.toHaveBeenCalled();
     });
   });
 });

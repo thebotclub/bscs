@@ -249,4 +249,104 @@ describe('Core Watchdog Module', () => {
       expect(mockStart).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('per-agent restart on healthy gateway', () => {
+    it('should restart individual agent when gateway is up but agent is down', async () => {
+      const { restartUnhealthy, resetRestartCounts } = await import('../../../src/core/watchdog.js');
+      resetRestartCounts();
+
+      const config = loadConfig();
+      const gwUrl = 'http://gw-ok.test:18777';
+      config.agents = {
+        'oc-sick': { name: 'oc-sick', status: 'running', runtime: 'openclaw', openclaw: { gatewayUrl: gwUrl } },
+      };
+      saveConfig(config);
+
+      // Agent is unhealthy but NOT gateway-down
+      mockHealthCheck.mockImplementationOnce((name: string) => Promise.resolve({
+        name,
+        status: 'unhealthy',
+        containerStatus: 'agent-stopped',
+        restartNeeded: true,
+        lastCheck: new Date().toISOString(),
+        error: 'Agent not responding',
+      }));
+      mockStart.mockClear();
+
+      const results = await restartUnhealthy({ interval: 30, maxRestarts: 5, cooldownMs: 0 });
+      expect(results).toHaveLength(1);
+      expect(results[0]!.restarted).toBe(true);
+      expect(results[0]!.name).toBe('oc-sick');
+      // start() called with agent name (per-agent restart, not gateway)
+      expect(mockStart).toHaveBeenCalledWith('oc-sick');
+    });
+
+    it('should respect max restarts for per-agent key', async () => {
+      const { restartUnhealthy, resetRestartCounts } = await import('../../../src/core/watchdog.js');
+      resetRestartCounts();
+
+      const config = loadConfig();
+      const gwUrl = 'http://gw-ok.test:18777';
+      config.agents = {
+        'oc-flaky': { name: 'oc-flaky', status: 'running', runtime: 'openclaw', openclaw: { gatewayUrl: gwUrl } },
+      };
+      saveConfig(config);
+
+      // Always return agent-stopped (not gateway-down)
+      mockHealthCheck.mockImplementation((name: string) => Promise.resolve({
+        name,
+        status: 'unhealthy',
+        containerStatus: 'agent-stopped',
+        restartNeeded: true,
+        lastCheck: new Date().toISOString(),
+        error: 'Agent not responding',
+      }));
+      mockStart.mockClear();
+
+      // Exhaust the 1 allowed restart
+      const r1 = await restartUnhealthy({ interval: 30, maxRestarts: 1, cooldownMs: 0 });
+      expect(r1[0]!.restarted).toBe(true);
+
+      // Second attempt should be blocked
+      const r2 = await restartUnhealthy({ interval: 30, maxRestarts: 1, cooldownMs: 0 });
+      expect(r2[0]!.restarted).toBe(false);
+      expect(r2[0]!.error).toContain('Max restarts');
+
+      // Reset clears it
+      resetRestartCounts('oc-flaky');
+      const r3 = await restartUnhealthy({ interval: 30, maxRestarts: 1, cooldownMs: 0 });
+      expect(r3[0]!.restarted).toBe(true);
+    });
+
+    it('should reset namespaced agent: keys via resetRestartCounts', async () => {
+      const { restartUnhealthy, resetRestartCounts } = await import('../../../src/core/watchdog.js');
+      resetRestartCounts();
+
+      const config = loadConfig();
+      const gwUrl = 'http://gw-ok.test:18777';
+      config.agents = {
+        'oc-ns': { name: 'oc-ns', status: 'running', runtime: 'openclaw', openclaw: { gatewayUrl: gwUrl } },
+      };
+      saveConfig(config);
+
+      mockHealthCheck.mockImplementation((name: string) => Promise.resolve({
+        name,
+        status: 'unhealthy',
+        containerStatus: 'agent-stopped',
+        restartNeeded: true,
+        lastCheck: new Date().toISOString(),
+        error: 'Agent not responding',
+      }));
+
+      // Exhaust restarts
+      await restartUnhealthy({ interval: 30, maxRestarts: 1, cooldownMs: 0 });
+      const blocked = await restartUnhealthy({ interval: 30, maxRestarts: 1, cooldownMs: 0 });
+      expect(blocked[0]!.restarted).toBe(false);
+
+      // Reset by name should clear agent:oc-ns too
+      resetRestartCounts('oc-ns');
+      const unblocked = await restartUnhealthy({ interval: 30, maxRestarts: 1, cooldownMs: 0 });
+      expect(unblocked[0]!.restarted).toBe(true);
+    });
+  });
 });
