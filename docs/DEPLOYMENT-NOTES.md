@@ -118,3 +118,113 @@ The BSCS LLM gateway (port 18999) only tracks costs for requests it proxies. Age
 ### ISSUE-5: Test mocks don't match real OpenClaw API
 
 Unit tests for `importFromOpenClaw` used `{ name: "..." }` format. Real API returns `{ id: "..." }`. Tests now updated but need a fixture file or constant that mirrors the real response schema to prevent future drift.
+
+---
+
+## Phase 2: LLM Gateway as Additive Model Provider (2026-04-03)
+
+### Architecture
+
+Three-layer resilience for all agents:
+
+1. **BSCS gateway** (port 18999, Docker container) — retry with exponential backoff, fallback chains, per-agent cost tracking
+2. **Direct provider fallback** — if BSCS gateway is down, OpenClaw's built-in fallback routes to providers directly
+3. **Existing behavior** — all original provider configs untouched
+
+The BSCS gateway runs as a Docker container (`bscs-gateway`) on the default bridge network, connected to `docker-khadem_default` for Khadem access. Port 18999 is published to the host.
+
+### Bugs Found and Fixed (Phase 2)
+
+#### BUG-6: `resolveProvider` used prefix-based inference only
+
+**Severity:** Critical — all non-Anthropic models routed to wrong provider.
+
+**Root cause:** `resolveProvider()` only matched models by prefix (`claude-` → anthropic, `gpt-` → openai). Models like `glm-5-turbo`, `MiniMax-M2.7`, `Qwen/Qwen2.5-72B-Instruct-GPTQ-Int4` have no matching prefix and fell to the default `openai` type, routing them to whichever `openai`-type provider appeared first in config (usually MiniMax).
+
+**Fix:** First try exact match against each provider's configured `models[]` list. Only fall back to prefix-based inference if no list match found. Commit: `af5ce54`.
+
+#### BUG-7: Provider prefix stripping broke models with internal slashes
+
+**Severity:** High — `Qwen/Qwen2.5-72B-Instruct-GPTQ-Int4` routed to MiniMax instead of C4140.
+
+**Root cause:** `model.split('/').pop()` stripped ALL path components. For `Qwen/Qwen2.5-72B-Instruct-GPTQ-Int4`, this produced `Qwen2.5-72B-Instruct-GPTQ-Int4` which didn't match the C4140 provider's model list entry `Qwen/Qwen2.5-72B-Instruct-GPTQ-Int4`.
+
+**Fix:** Try the full model name first, then try with only the first path component stripped (`model.substring(model.indexOf('/') + 1)`). Commit: `af5ce54`.
+
+#### BUG-8: `buildAnthropicRequest` used wrong URL path
+
+**Severity:** High — all Anthropic API calls returned 404.
+
+**Root cause:** Constructed URL as `${baseUrl}/messages`. Provider baseUrl is `https://api.anthropic.com` (no `/v1`), so the request went to `https://api.anthropic.com/messages` instead of `https://api.anthropic.com/v1/messages`.
+
+**Fix:** Changed to `${baseUrl}/v1/messages`. Commit: `af5ce54`.
+
+#### BUG-9: Fallback chain didn't trigger on HTTP errors
+
+**Severity:** High — fallback only worked on connection failures, not on HTTP error responses.
+
+**Root cause:** `proxyRequest()` had `return` inside the `try` block that executed for ALL responses (success or error), preventing iteration to the next fallback model. Fallback only happened if `fetchWithRetry` threw an exception (connection error/timeout).
+
+**Fix:** Only return immediately on 2xx responses. On non-2xx, log the error and continue to the next model in the chain. Commit: `af5ce54`.
+
+### Deployment Gotchas (Phase 2)
+
+#### GOTCHA-6: Docker bridge containers can't reach host-bound ports
+
+Containers on Docker's default `bridge` network cannot reach ports bound by host processes (even on `0.0.0.0`). The `csuite-bots` container works because it uses `--network host`. But `vector-bot` (bridge) and `khadem-bot` (docker-khadem_default) cannot reach a host-bound process on `172.17.0.1:18999` or `172.18.0.1:18999`.
+
+**Fix:** Run the BSCS gateway as a Docker container with `--network bridge -p 18999:18999`. Docker's published port handling uses DNAT rules that work across bridge networks. Connect the gateway container to additional networks as needed (`docker network connect docker-khadem_default bscs-gateway`).
+
+#### GOTCHA-7: Custom DNS breaks Docker container name resolution
+
+`vector-bot` has `/etc/resolv.conf` pointing to `8.8.8.8` instead of Docker's internal DNS (`127.0.0.11`). Container name resolution (`bscs-gateway`) doesn't work.
+
+**Fix:** Use the gateway container's bridge IP directly (`172.17.0.4:18999`) instead of the container name. Note: this IP can change if the container is recreated. Consider assigning a static IP or fixing the DNS config.
+
+#### GOTCHA-8: MiniMax uses Anthropic-compatible API, not OpenAI
+
+The MiniMax provider endpoint at `https://api.minimax.io/anthropic` expects Anthropic message format (`/v1/messages`), not OpenAI chat completions format (`/chat/completions`). Setting `"type": "anthropic"` in the BSCS provider config routes requests through `buildAnthropicRequest`.
+
+#### GOTCHA-9: API keys differ between OpenClaw and BSCS configs
+
+OpenClaw and BSCS maintain separate config files. When copying API keys, verify they match. In this deployment, the ZAI and MiniMax keys were different between the two configs. Always extract keys from the authoritative source (OpenClaw's `~/.openclaw/openclaw.json`).
+
+### Gateway Docker Setup
+
+```bash
+# Run as Docker container (not host process) for cross-network access
+docker run -d --name bscs-gateway --restart unless-stopped \
+  --network bridge \
+  -v /home/hani/bscs:/app \
+  -v /home/hani/.config/bscs:/root/.config/bscs \
+  -p 18999:18999 \
+  -w /app node:24-slim \
+  node dist/bin/bscs.js gateway start --port 18999 --bind 0.0.0.0
+
+# Connect to Khadem's network
+docker network connect docker-khadem_default bscs-gateway
+```
+
+### Provider baseUrl per Container
+
+| Container | Network | BSCS baseUrl |
+|-----------|---------|-------------|
+| csuite-bots | host | `http://127.0.0.1:18999/v1` |
+| khadem-bot | docker-khadem_default | `http://bscs-gateway:18999/v1` |
+| vector-bot | bridge (custom DNS) | `http://172.17.0.4:18999/v1` |
+
+### Current Agent Routing (Post-Phase-2)
+
+| Agent | Container | Persona | Primary | Fallback Chain |
+|-------|-----------|---------|---------|----------------|
+| Atlas | csuite-bots | Architect | `bscs/claude-opus-4-6` | opus → sonnet → glm-5-turbo → MiniMax-M2.7 |
+| Forge | csuite-bots | Builder | `bscs/glm-5` | glm-5 → sonnet → qwen-72b → MiniMax-HS |
+| Oracle | csuite-bots | Investigator | `bscs/claude-sonnet-4-6` | sonnet → MiniMax-M2.7 → glm-5-turbo → qwen-72b |
+| Warden | csuite-bots | Sentinel | `c4140/qwen-72b` *(direct)* | MiniMax-HS → glm-5-turbo → sonnet |
+| Yield | csuite-bots | Investigator | `bscs/claude-sonnet-4-6` | sonnet → MiniMax-M2.7 → glm-5-turbo → qwen-72b |
+| Nova | csuite-bots | Herald | `bscs/claude-sonnet-4-6` | sonnet → MiniMax-M2.7 → glm-5-turbo → qwen-72b |
+| Clerk | csuite-bots | Sentinel | `c4140/qwen-72b` *(direct)* | MiniMax-HS → glm-5-turbo → sonnet |
+| Khadem | khadem-bot | Builder | `bscs/glm-5` | glm-5 → sonnet → qwen-72b → MiniMax-HS |
+| Vector | vector-bot | Herald | `bscs/claude-sonnet-4-6` | sonnet → MiniMax-M2.7 → glm-5-turbo → qwen-72b |
+
+Sentinel agents (Warden, Clerk) bypass BSCS and use C4140 directly (local, free, no rate limits).
