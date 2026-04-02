@@ -167,9 +167,11 @@ export function createFleetImportCommand(): Command {
     .description('Import configuration from legacy fleet.sh or OpenClaw gateway')
     .option('--from-fleet-sh <path>', 'Path to fleet.sh config directory')
     .option('--from-openclaw [url]', 'Import agents from OpenClaw gateway')
-    .option('--apply', 'Write changes to config (dry-run by default for --from-openclaw)')
+    .option('--from-docker', 'Import agents from running Docker containers')
+    .option('--exclude <patterns...>', 'Exclude containers matching these patterns (for --from-docker)')
+    .option('--apply', 'Write changes to config (dry-run by default)')
     .option('--dry-run', 'Show what would be imported without making changes')
-    .action(async (options: { fromFleetSh?: string; fromOpenclaw?: string | true; apply?: boolean; dryRun?: boolean }) => {
+    .action(async (options: { fromFleetSh?: string; fromOpenclaw?: string | true; fromDocker?: boolean; exclude?: string[]; apply?: boolean; dryRun?: boolean }) => {
       await withErrorHandler(async () => {
 
       // ── OpenClaw Gateway Import ──
@@ -228,14 +230,67 @@ export function createFleetImportCommand(): Command {
         return;
       }
 
+      // ── Docker Import ──
+      if (options.fromDocker) {
+        logger.debug({ apply: options.apply, exclude: options.exclude }, 'Importing from Docker');
+
+        const { importFromDocker } = await import('../../core/fleet.js');
+
+        console.log(chalk.dim('Scanning Docker containers...'));
+
+        let result: import('../../core/fleet.js').DockerImportResult;
+        try {
+          result = await importFromDocker({ apply: options.apply, exclude: options.exclude });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(chalk.red(`Error: ${msg}`));
+          process.exit(1);
+        }
+
+        if (result.imported.length === 0 && result.skipped.length === 0) {
+          console.log(chalk.yellow('\nNo new Docker containers found to import.'));
+          return;
+        }
+
+        console.log(chalk.bold(`\n📋 Docker Import ${options.apply ? 'Result' : 'Preview (dry-run)'}\n`));
+
+        if (result.imported.length > 0) {
+          console.log(chalk.green(`  ${options.apply ? 'Imported' : 'Would import'}: ${result.imported.length} container(s)`));
+          for (const { name, container, image } of result.imported) {
+            console.log(chalk.dim(`    + ${name} (${container}) — ${image}`));
+          }
+        }
+
+        if (result.skipped.length > 0) {
+          console.log(chalk.yellow(`  Skipped (already in config): ${result.skipped.length}`));
+          for (const name of result.skipped) {
+            console.log(chalk.dim(`    ~ ${name}`));
+          }
+        }
+
+        if (result.errors.length > 0) {
+          console.log(chalk.red(`  Errors: ${result.errors.length}`));
+          for (const err of result.errors) {
+            console.log(chalk.dim(`    ! ${err}`));
+          }
+        }
+
+        if (!options.apply) {
+          console.log(chalk.dim('\nRun with --apply to write changes to config.'));
+        }
+
+        return;
+      }
+
       // ── Legacy fleet.sh Import ──
       logger.debug({ options }, 'Importing from fleet.sh');
       
       if (!options.fromFleetSh) {
-        console.error(chalk.red('Error: --from-fleet-sh or --from-openclaw is required'));
+        console.error(chalk.red('Error: --from-fleet-sh, --from-openclaw, or --from-docker is required'));
         console.log(chalk.dim('\nUsage:'));
-        console.log(chalk.dim('  bscs fleet import --from-fleet-sh ~/.fleet'));
+        console.log(chalk.dim('  bscs fleet import --from-docker'));
         console.log(chalk.dim('  bscs fleet import --from-openclaw [gatewayUrl]'));
+        console.log(chalk.dim('  bscs fleet import --from-fleet-sh ~/.fleet'));
         process.exit(1);
       }
       

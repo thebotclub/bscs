@@ -17,6 +17,9 @@ function getRuntimeForAgent(agentConfig: AgentConfig) {
   return getRuntime(agentConfig.runtime || 'docker', {
     port: agentConfig.ports?.gateway,
     gatewayUrl: agentConfig.openclaw?.gatewayUrl,
+    containerNames: agentConfig.container
+      ? new Map([[agentConfig.name, agentConfig.container]])
+      : undefined,
   });
 }
 

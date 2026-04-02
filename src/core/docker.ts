@@ -91,11 +91,33 @@ export async function listBscsContainers(): Promise<ContainerInfo[]> {
   }
 }
 
-export async function getContainer(name: string): Promise<ContainerInfo | null> {
+/** List ALL containers (not just openclaw_-prefixed ones). */
+export async function listAllContainers(): Promise<ContainerInfo[]> {
   const docker = await getDocker();
-  
+
   try {
-    const container = docker.getContainer(`openclaw_${name}`);
+    const containers = await docker.listContainers({ all: true });
+
+    return containers.map((c: { Id: string; State: string; Image: string; Ports: Array<{ PublicPort?: number; PrivatePort?: number }>; Created: number; Names: string[] }) => ({
+      name: (c.Names[0] || '').replace('/', ''),
+      id: c.Id,
+      status: mapStatus(c.State),
+      image: c.Image,
+      ports: extractPorts(c.Ports),
+      created: new Date(c.Created * 1000),
+    }));
+  } catch (err) {
+    logger.error({ err }, 'Failed to list all containers');
+    throw err;
+  }
+}
+
+export async function getContainer(name: string, containerName?: string): Promise<ContainerInfo | null> {
+  const docker = await getDocker();
+
+  try {
+    const actualName = containerName || `openclaw_${name}`;
+    const container = docker.getContainer(actualName);
     const info = await container.inspect();
     
     return {

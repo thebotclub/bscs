@@ -6,6 +6,7 @@ import { loadConfig, saveConfig } from '../../../src/core/config.js';
 
 vi.mock('../../../src/core/docker.js', () => ({
   listBscsContainers: vi.fn().mockResolvedValue([]),
+  listAllContainers: vi.fn().mockResolvedValue([]),
   pullImage: vi.fn().mockResolvedValue(undefined),
   createContainer: vi.fn().mockResolvedValue({ id: 'c123' }),
   startContainer: vi.fn().mockResolvedValue(undefined),

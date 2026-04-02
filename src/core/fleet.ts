@@ -12,6 +12,7 @@ import { sshExec } from '../util/ssh.js';
 import type { AgentConfig } from '../util/types.js';
 import {
   listBscsContainers,
+  listAllContainers,
   type ContainerInfo,
 } from './docker.js';
 import { getRuntime, isOpenClawRuntime } from './runtime/index.js';
@@ -736,6 +737,110 @@ export function importFromOpenClaw(
     logger.info(
       { imported: result.imported.length, skipped: result.skipped.length },
       'OpenClaw agents imported',
+    );
+  }
+
+  return result;
+}
+
+// ── Docker Import ─────────────────────────────────────────────────────
+
+export interface DockerImportResult {
+  imported: Array<{ name: string; container: string; image: string }>;
+  skipped: string[];
+  errors: string[];
+}
+
+// Containers to always ignore during Docker import
+const DOCKER_IGNORE_PREFIXES = ['bscs-', 'openmesh-', 'litellm-'];
+const DOCKER_IGNORE_NAMES = ['opengateway'];
+
+export async function importFromDocker(
+  options: { apply?: boolean; exclude?: string[] } = {},
+): Promise<DockerImportResult> {
+  const config = loadConfig();
+  const result: DockerImportResult = { imported: [], skipped: [], errors: [] };
+
+  let containers: ContainerInfo[];
+  try {
+    containers = await listAllContainers();
+  } catch (err) {
+    throw new Error(`Failed to list Docker containers: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  const existingNames = new Set(Object.keys(config.agents || {}));
+  const excludePatterns = options.exclude || [];
+
+  for (const c of containers) {
+    const containerName = c.name;
+
+    // Skip openclaw_-prefixed containers (managed by DockerRuntime default)
+    if (containerName.startsWith('openclaw_')) {
+      continue;
+    }
+
+    // Skip ignored prefixes
+    if (DOCKER_IGNORE_PREFIXES.some((p) => containerName.startsWith(p))) {
+      continue;
+    }
+
+    // Skip ignored names
+    if (DOCKER_IGNORE_NAMES.includes(containerName)) {
+      continue;
+    }
+
+    // Skip user-excluded patterns
+    if (excludePatterns.some((p) => containerName.includes(p))) {
+      continue;
+    }
+
+    // Skip stopped containers
+    if (c.status !== 'running') {
+      continue;
+    }
+
+    // Derive agent name from container name (strip known suffixes like -bot, -agent)
+    let agentName = containerName
+      .replace(/-bot$/, '')
+      .replace(/-agent$/, '');
+
+    // Validate agent name format
+    if (!/^[a-z][a-z0-9-]{1,30}$/.test(agentName)) {
+      result.errors.push(`Container "${containerName}" — name "${agentName}" doesn't match [a-z][a-z0-9-]{1,30}`);
+      continue;
+    }
+
+    if (existingNames.has(agentName)) {
+      result.skipped.push(containerName);
+      continue;
+    }
+
+    const agentConfig: AgentConfig = {
+      name: agentName,
+      template: 'custom',
+      role: 'custom',
+      machine: 'localhost',
+      image: c.image,
+      container: containerName,
+      runtime: 'docker',
+      created: new Date().toISOString(),
+      status: 'running',
+      ports: c.ports,
+    };
+
+    if (options.apply) {
+      config.agents = config.agents || {};
+      config.agents[agentName] = agentConfig;
+    }
+
+    result.imported.push({ name: agentName, container: containerName, image: c.image });
+  }
+
+  if (options.apply && result.imported.length > 0) {
+    saveConfig(config);
+    logger.info(
+      { imported: result.imported.length, skipped: result.skipped.length },
+      'Docker agents imported',
     );
   }
 

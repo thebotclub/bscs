@@ -12,10 +12,18 @@ export { DockerRuntime } from './docker.js';
 export { NativeRuntime } from './native.js';
 export { OpenClawRuntime } from './openclaw.js';
 
-export function getRuntime(runtimeType?: string, opts?: { port?: number; gatewayUrl?: string }): AgentRuntime {
+interface RuntimeOpts {
+  port?: number;
+  gatewayUrl?: string;
+  containerNames?: Map<string, string>;
+}
+
+export function getRuntime(runtimeType?: string, opts?: RuntimeOpts): AgentRuntime {
   switch (runtimeType || 'docker') {
-    case 'docker':
-      return new DockerRuntime();
+    case 'docker': {
+      const dr = new DockerRuntime(opts?.containerNames);
+      return dr;
+    }
     case 'native':
       return new NativeRuntime(opts?.port);
     case 'openclaw':

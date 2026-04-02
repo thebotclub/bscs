@@ -9,7 +9,7 @@ import {
   stopContainer,
   removeContainer,
   getContainer,
-  listBscsContainers,
+  listAllContainers,
   pullImage,
   isDockerRunning,
 } from '../docker.js';
@@ -22,6 +22,23 @@ import type {
 } from './types.js';
 
 export class DockerRuntime implements AgentRuntime {
+  /** Map of agent name -> actual Docker container name (e.g. { khadem: "khadem-bot" }) */
+  private containerNames: Map<string, string>;
+
+  constructor(containerNames?: Map<string, string>) {
+    this.containerNames = containerNames || new Map();
+  }
+
+  /** Register a custom container name for an agent. */
+  setContainerName(agentName: string, containerName: string): void {
+    this.containerNames.set(agentName, containerName);
+  }
+
+  /** Resolve the actual Docker container name for an agent. */
+  resolveContainerName(name: string): string {
+    return this.containerNames.get(name) || `openclaw_${name}`;
+  }
+
   async create(name: string, config: AgentRuntimeConfig): Promise<CreateResult> {
     if (config.image) {
       await pullImage(config.image);
@@ -55,7 +72,8 @@ export class DockerRuntime implements AgentRuntime {
   }
 
   async status(name: string): Promise<RuntimeStatus> {
-    const container = await getContainer(name);
+    const containerName = this.resolveContainerName(name);
+    const container = await getContainer(name, containerName);
     if (!container) {
       return { name, status: 'missing' };
     }
@@ -69,32 +87,46 @@ export class DockerRuntime implements AgentRuntime {
   }
 
   logs(name: string, opts?: { tail?: number; follow?: boolean }): ChildProcess {
+    const containerName = this.resolveContainerName(name);
     const args = ['logs'];
     if (opts?.follow) args.push('-f');
     if (opts?.tail !== undefined) args.push('--tail', String(opts.tail));
-    args.push(`openclaw_${name}`);
+    args.push(containerName);
     return spawn('docker', args, { stdio: 'inherit' });
   }
 
   shell(name: string): ChildProcess {
-    return spawn('docker', ['exec', '-it', `openclaw_${name}`, '/bin/sh'], {
+    const containerName = this.resolveContainerName(name);
+    return spawn('docker', ['exec', '-it', containerName, '/bin/sh'], {
       stdio: 'inherit',
     });
   }
 
   async list(): Promise<RuntimeStatus[]> {
-    const containers = await listBscsContainers();
-    return containers.map((c) => ({
-      name: c.name.replace('openclaw_', ''),
-      status: c.status,
-      containerId: c.id,
-      image: c.image,
-      ports: c.ports as { gateway?: number; remote?: number } | undefined,
-    }));
+    const containers = await listAllContainers();
+    // Return containers that are either openclaw_-prefixed or explicitly registered
+    return containers
+      .filter((c) =>
+        c.name.startsWith('openclaw_') ||
+        [...this.containerNames.values()].includes(c.name),
+      )
+      .map((c) => {
+        // Strip openclaw_ prefix for standard names, use as-is for custom names
+        const registered = [...this.containerNames.entries()].find(([, cn]) => cn === c.name);
+        const agentName = registered ? registered[0] : c.name.replace('openclaw_', '');
+        return {
+          name: agentName,
+          status: c.status,
+          containerId: c.id,
+          image: c.image,
+          ports: c.ports as { gateway?: number; remote?: number } | undefined,
+        };
+      });
   }
 
   async healthCheck(name: string): Promise<HealthCheckResult> {
-    const container = await getContainer(name);
+    const containerName = this.resolveContainerName(name);
+    const container = await getContainer(name, containerName);
     const now = new Date().toISOString();
 
     if (!container) {

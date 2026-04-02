@@ -6,6 +6,10 @@ vi.mock('../../../src/core/docker.js', () => ({
     { name: 'openclaw_agent-1', status: 'running', image: 'test:latest', id: 'abc123' },
     { name: 'openclaw_agent-2', status: 'exited', image: 'test:latest', id: 'def456' },
   ]),
+  listAllContainers: vi.fn().mockResolvedValue([
+    { name: 'openclaw_agent-1', status: 'running', image: 'test:latest', id: 'abc123' },
+    { name: 'openclaw_agent-2', status: 'exited', image: 'test:latest', id: 'def456' },
+  ]),
   startContainer: vi.fn().mockResolvedValue(undefined),
 }));
 
