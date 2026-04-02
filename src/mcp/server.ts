@@ -16,6 +16,12 @@ import {
   destroyAgent,
   restartAgent,
   logsAgent,
+  bindChannel,
+  unbindChannel,
+  addCronJob,
+  removeCronJob,
+  listCronJobs,
+  setAgentConfig,
 } from '../core/agent.js';
 import { getCostData, generateCostReport } from '../core/cost.js';
 import { runSecurityAudit } from '../core/security.js';
@@ -56,9 +62,15 @@ export async function startMcpServer(): Promise<void> {
     'agent_create',
     'Create a new AI agent container',
     {
-      name: z.string().describe('Agent name'),
+      name: z.string().min(2).max(31).regex(/^[a-z][a-z0-9-]*$/, 'Lowercase alphanumeric + hyphens').describe('Agent name'),
       role: z.enum(['coding', 'review', 'brain', 'security', 'ops', 'marketing', 'custom']).describe('Agent role'),
-      model: z.string().optional().describe('Model to use (e.g. claude-sonnet-4)'),
+      model: z.string().min(1).max(128).optional().describe('Model to use (e.g. claude-sonnet-4)'),
+      runtime: z.enum(['docker', 'native', 'openclaw']).optional().describe('Runtime type (default: docker)'),
+      gatewayUrl: z.string().url().optional().describe('Gateway URL for openclaw runtime'),
+      channels: z.array(z.object({
+        type: z.enum(['telegram', 'discord']),
+        accountId: z.string(),
+      })).optional().describe('Channels to bind after creation (openclaw only)'),
     },
     async (args) => {
       try {
@@ -66,7 +78,17 @@ export async function startMcpServer(): Promise<void> {
           name: args.name,
           role: args.role,
           model: args.model,
+          runtime: args.runtime,
+          gatewayUrl: args.gatewayUrl,
         });
+
+        // Bind channels if specified (openclaw only)
+        if (args.channels && args.channels.length > 0) {
+          for (const ch of args.channels) {
+            await bindChannel(args.name, ch.type, ch.accountId);
+          }
+        }
+
         return {
           content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
         };
@@ -84,7 +106,7 @@ export async function startMcpServer(): Promise<void> {
     'agent_destroy',
     'Destroy an AI agent container',
     {
-      name: z.string().describe('Agent name to destroy'),
+      name: z.string().min(2).max(31).regex(/^[a-z][a-z0-9-]*$/, 'Lowercase alphanumeric + hyphens').describe('Agent name to destroy'),
       force: z.boolean().optional().describe('Force removal of running container'),
     },
     async (args) => {
@@ -107,8 +129,8 @@ export async function startMcpServer(): Promise<void> {
     'agent_logs',
     'Get recent logs from an agent container',
     {
-      name: z.string().describe('Agent name'),
-      lines: z.number().optional().describe('Number of lines to return (default: 50)'),
+      name: z.string().min(2).max(31).regex(/^[a-z][a-z0-9-]*$/, 'Lowercase alphanumeric + hyphens').describe('Agent name'),
+      lines: z.number().int().min(1).max(10000).optional().describe('Number of lines to return (default: 50)'),
     },
     async (args) => {
       try {
@@ -146,7 +168,7 @@ export async function startMcpServer(): Promise<void> {
     'agent_restart',
     'Restart an AI agent container',
     {
-      name: z.string().describe('Agent name to restart'),
+      name: z.string().min(2).max(31).regex(/^[a-z][a-z0-9-]*$/, 'Lowercase alphanumeric + hyphens').describe('Agent name to restart'),
     },
     async (args) => {
       try {
@@ -232,6 +254,172 @@ export async function startMcpServer(): Promise<void> {
         const result = runSecurityAudit();
         return {
           content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ── agent_bind ──────────────────────────────────────────────────────
+  server.tool(
+    'agent_bind',
+    'Bind a channel (telegram/discord) to an openclaw agent',
+    {
+      name: z.string().min(2).max(31).regex(/^[a-z][a-z0-9-]*$/, 'Lowercase alphanumeric + hyphens').describe('Agent name'),
+      channel: z.enum(['telegram', 'discord']).describe('Channel type'),
+      accountId: z.string().min(1).max(255).describe('Account ID for the channel'),
+    },
+    async (args) => {
+      try {
+        await bindChannel(args.name, args.channel, args.accountId);
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ bound: true, agent: args.name, channel: args.channel }) }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ── agent_unbind ───────────────────────────────────────────────────
+  server.tool(
+    'agent_unbind',
+    'Unbind a channel from an openclaw agent',
+    {
+      name: z.string().min(2).max(31).regex(/^[a-z][a-z0-9-]*$/, 'Lowercase alphanumeric + hyphens').describe('Agent name'),
+      channel: z.enum(['telegram', 'discord']).describe('Channel type to unbind'),
+    },
+    async (args) => {
+      try {
+        await unbindChannel(args.name, args.channel);
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ unbound: true, agent: args.name, channel: args.channel }) }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ── cron_add ───────────────────────────────────────────────────────
+  server.tool(
+    'cron_add',
+    'Add a cron job to an openclaw agent',
+    {
+      name: z.string().min(2).max(31).regex(/^[a-z][a-z0-9-]*$/, 'Lowercase alphanumeric + hyphens').describe('Agent name'),
+      id: z.string().min(1).max(64).describe('Unique cron job identifier'),
+      cron: z.string().regex(/^(\*|[0-9,\-/]+)\s+(\*|[0-9,\-/]+)\s+(\*|[0-9,\-/]+)\s+(\*|[0-9,\-/]+)\s+(\*|[0-9,\-/]+)$/, 'Invalid cron expression').describe('Cron expression (e.g. "0 9 * * *")'),
+      message: z.string().min(1).max(4096).describe('Message/prompt to send on schedule'),
+      channel: z.string().min(1).max(64).optional().describe('Target channel for the cron message'),
+    },
+    async (args) => {
+      try {
+        addCronJob(args.name, { id: args.id, cron: args.cron, message: args.message, channel: args.channel });
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ added: true, agent: args.name, cronId: args.id }) }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ── cron_remove ────────────────────────────────────────────────────
+  server.tool(
+    'cron_remove',
+    'Remove a cron job from an agent',
+    {
+      name: z.string().min(2).max(31).regex(/^[a-z][a-z0-9-]*$/, 'Lowercase alphanumeric + hyphens').describe('Agent name'),
+      id: z.string().min(1).max(64).describe('Cron job identifier to remove'),
+    },
+    async (args) => {
+      try {
+        removeCronJob(args.name, args.id);
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ removed: true, agent: args.name, cronId: args.id }) }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ── cron_list ──────────────────────────────────────────────────────
+  server.tool(
+    'cron_list',
+    'List cron jobs for an agent',
+    {
+      name: z.string().min(2).max(31).regex(/^[a-z][a-z0-9-]*$/, 'Lowercase alphanumeric + hyphens').describe('Agent name'),
+    },
+    async (args) => {
+      try {
+        const jobs = listCronJobs(args.name);
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(jobs, null, 2) }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ── agent_config_set ───────────────────────────────────────────────
+  server.tool(
+    'agent_config_set',
+    'Set a configuration value on an openclaw agent via the gateway',
+    {
+      name: z.string().min(2).max(31).regex(/^[a-z][a-z0-9-]*$/, 'Lowercase alphanumeric + hyphens').describe('Agent name'),
+      path: z.string().min(1).max(128).regex(/^[a-z0-9][a-z0-9._-]*$/, 'Invalid config path').describe('Config path (e.g. "agent.myagent.model")'),
+      value: z.string().min(1).max(1024).describe('Config value to set'),
+    },
+    async (args) => {
+      try {
+        await setAgentConfig(args.name, args.path, args.value);
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ set: true, agent: args.name, path: args.path }) }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ── secrets_audit ──────────────────────────────────────────────────
+  server.tool(
+    'secrets_audit',
+    'Audit secrets configuration for potential issues',
+    {},
+    async () => {
+      try {
+        const audit = runSecurityAudit();
+        // Extract secrets-related findings
+        const secretsFindings = audit.findings.filter(
+          (f) => f.category === 'secrets' || f.message.toLowerCase().includes('secret') || f.message.toLowerCase().includes('key'),
+        );
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ findings: secretsFindings, total: secretsFindings.length }, null, 2) }],
         };
       } catch (err) {
         return {

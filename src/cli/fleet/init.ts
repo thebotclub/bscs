@@ -164,16 +164,78 @@ export function createFleetInitCommand(): Command {
 
 export function createFleetImportCommand(): Command {
   return new Command('import')
-    .description('Import configuration from legacy fleet.sh')
+    .description('Import configuration from legacy fleet.sh or OpenClaw gateway')
     .option('--from-fleet-sh <path>', 'Path to fleet.sh config directory')
+    .option('--from-openclaw [url]', 'Import agents from OpenClaw gateway')
+    .option('--apply', 'Write changes to config (dry-run by default for --from-openclaw)')
     .option('--dry-run', 'Show what would be imported without making changes')
-    .action(async (options: { fromFleetSh?: string; dryRun?: boolean }) => {
+    .action(async (options: { fromFleetSh?: string; fromOpenclaw?: string | true; apply?: boolean; dryRun?: boolean }) => {
       await withErrorHandler(async () => {
+
+      // ── OpenClaw Gateway Import ──
+      if (options.fromOpenclaw !== undefined) {
+        const gatewayUrl = typeof options.fromOpenclaw === 'string'
+          ? options.fromOpenclaw
+          : 'http://127.0.0.1:18777';
+
+        logger.debug({ gatewayUrl, apply: options.apply }, 'Importing from OpenClaw gateway');
+
+        const { importFromOpenClaw } = await import('../../core/fleet.js');
+
+        console.log(chalk.dim(`Querying OpenClaw gateway at ${gatewayUrl}...`));
+
+        let result: import('../../core/fleet.js').OpenClawImportResult;
+        try {
+          result = importFromOpenClaw(gatewayUrl, { apply: options.apply });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(chalk.red(`Error: ${msg}`));
+          process.exit(1);
+        }
+
+        if (result.imported.length === 0 && result.skipped.length === 0) {
+          console.log(chalk.yellow('\nNo agents found on the gateway.'));
+          return;
+        }
+
+        console.log(chalk.bold(`\n📋 OpenClaw Import ${options.apply ? 'Result' : 'Preview (dry-run)'}\n`));
+
+        if (result.imported.length > 0) {
+          console.log(chalk.green(`  ${options.apply ? 'Imported' : 'Would import'}: ${result.imported.length} agent(s)`));
+          for (const name of result.imported) {
+            console.log(chalk.dim(`    + ${name}`));
+          }
+        }
+
+        if (result.skipped.length > 0) {
+          console.log(chalk.yellow(`  Skipped (already in config): ${result.skipped.length}`));
+          for (const name of result.skipped) {
+            console.log(chalk.dim(`    ~ ${name}`));
+          }
+        }
+
+        if (result.errors.length > 0) {
+          console.log(chalk.red(`  Errors: ${result.errors.length}`));
+          for (const err of result.errors) {
+            console.log(chalk.dim(`    ! ${err}`));
+          }
+        }
+
+        if (!options.apply) {
+          console.log(chalk.dim('\nRun with --apply to write changes to config.'));
+        }
+
+        return;
+      }
+
+      // ── Legacy fleet.sh Import ──
       logger.debug({ options }, 'Importing from fleet.sh');
       
       if (!options.fromFleetSh) {
-        console.error(chalk.red('Error: --from-fleet-sh path is required'));
-        console.log(chalk.dim('\nUsage: bscs fleet import --from-fleet-sh ~/.fleet'));
+        console.error(chalk.red('Error: --from-fleet-sh or --from-openclaw is required'));
+        console.log(chalk.dim('\nUsage:'));
+        console.log(chalk.dim('  bscs fleet import --from-fleet-sh ~/.fleet'));
+        console.log(chalk.dim('  bscs fleet import --from-openclaw [gatewayUrl]'));
         process.exit(1);
       }
       

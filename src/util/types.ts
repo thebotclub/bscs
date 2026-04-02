@@ -115,6 +115,44 @@ export const AgentTemplateSchema = z.enum([
   'custom',
 ]);
 
+export const ChannelTypeSchema = z.enum(['telegram', 'discord']);
+
+export const ChannelBindingSchema = z.object({
+  type: ChannelTypeSchema,
+  accountId: z.string(),
+});
+
+/** Standard 5-field cron: min hour dom month dow. Each field allows *, digits, commas, hyphens, slashes. */
+const CRON_REGEX = /^(\*|[0-9,\-/]+)\s+(\*|[0-9,\-/]+)\s+(\*|[0-9,\-/]+)\s+(\*|[0-9,\-/]+)\s+(\*|[0-9,\-/]+)$/;
+
+export const CronJobSchema = z.object({
+  id: z.string().min(1).max(64),
+  cron: z.string().regex(CRON_REGEX, 'Invalid cron expression — expected 5 fields: min hour dom month dow'),
+  message: z.string().min(1),
+  channel: z.string().optional(),
+});
+
+export const OpenClawConfigSchema = z.object({
+  gatewayUrl: z.string().default('http://127.0.0.1:18777'),
+  workspace: z.string().optional(),
+  channels: z.array(ChannelBindingSchema).optional(),
+  model: z.object({
+    primary: z.string(),
+    fallbacks: z.array(z.string()).optional(),
+  }).optional(),
+  skills: z.array(z.string()).optional(),
+  cronJobs: z.array(CronJobSchema).optional(),
+  identity: z.object({
+    name: z.string(),
+    emoji: z.string(),
+  }).optional(),
+});
+
+export type ChannelType = z.infer<typeof ChannelTypeSchema>;
+export type ChannelBinding = z.infer<typeof ChannelBindingSchema>;
+export type CronJob = z.infer<typeof CronJobSchema>;
+export type OpenClawConfig = z.infer<typeof OpenClawConfigSchema>;
+
 export const AgentConfigSchema = z.object({
   name: z
     .string()
@@ -124,7 +162,7 @@ export const AgentConfigSchema = z.object({
   machine: z.string().default('localhost'),
   image: z.string().optional(),
   model: z.string().optional(),
-  runtime: z.enum(['docker', 'native']).default('docker'),
+  runtime: z.enum(['docker', 'native', 'openclaw']).default('docker'),
   container: z.string().optional(),
   configPath: z.string().optional(),
   ports: z
@@ -135,6 +173,7 @@ export const AgentConfigSchema = z.object({
     .optional(),
   created: z.string().optional(),
   status: z.enum(['running', 'stopped', 'created']).optional(),
+  openclaw: OpenClawConfigSchema.optional(),
 });
 
 export type AgentRole = z.infer<typeof AgentRoleSchema>;

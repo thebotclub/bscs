@@ -10,6 +10,62 @@ vi.mock('../../../src/core/docker.js', () => ({
   startContainer: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Mock the runtime module so we can control OpenClawRuntime behavior
+const mockStart = vi.fn().mockResolvedValue(undefined);
+const mockHealthCheck = vi.fn().mockImplementation((name: string) => Promise.resolve({
+  name,
+  status: 'unhealthy',
+  containerStatus: 'gateway-down',
+  restartNeeded: true,
+  lastCheck: new Date().toISOString(),
+  error: 'Gateway unreachable',
+}));
+const mockList = vi.fn().mockResolvedValue([]);
+const mockOpenClawRuntime = {
+  start: mockStart,
+  stop: vi.fn().mockResolvedValue(undefined),
+  restart: vi.fn().mockResolvedValue(undefined),
+  healthCheck: mockHealthCheck,
+  list: mockList,
+  status: vi.fn().mockResolvedValue({ name: 'test', status: 'running' }),
+  create: vi.fn(),
+  destroy: vi.fn(),
+  logs: vi.fn(),
+  shell: vi.fn(),
+  isAvailable: vi.fn().mockResolvedValue(true),
+};
+
+vi.mock('../../../src/core/runtime/index.js', () => ({
+  getRuntime: vi.fn((type: string) => {
+    if (type === 'openclaw') return mockOpenClawRuntime;
+    // For docker, delegate to real docker mock (mimic DockerRuntime behavior)
+    return {
+      list: async () => {
+        const { listBscsContainers } = await import('../../../src/core/docker.js');
+        const containers = await listBscsContainers();
+        // Strip openclaw_ prefix like real DockerRuntime
+        return containers.map((c: { name: string; status: string }) => ({
+          name: c.name.replace('openclaw_', ''),
+          status: c.status,
+        }));
+      },
+      start: async (name: string) => {
+        const { startContainer } = await import('../../../src/core/docker.js');
+        return startContainer(name);
+      },
+      healthCheck: vi.fn(),
+      stop: vi.fn(),
+      restart: vi.fn(),
+      create: vi.fn(),
+      destroy: vi.fn(),
+      logs: vi.fn(),
+      shell: vi.fn(),
+      status: vi.fn(),
+      isAvailable: vi.fn().mockResolvedValue(true),
+    };
+  }),
+}));
+
 describe('Core Watchdog Module', () => {
   let tempDir: string;
   let originalConfigDir: string | undefined;
@@ -105,6 +161,92 @@ describe('Core Watchdog Module', () => {
       resetRestartCounts();
       const results = await restartUnhealthy({ interval: 30, maxRestarts: 1, cooldownMs: 0 });
       expect(results[0]!.restarted).toBe(true);
+    });
+  });
+
+  describe('gateway-aware restarts (WP-17)', () => {
+    it('should issue one restart for 4 agents on same down gateway', async () => {
+      const { restartUnhealthy, resetRestartCounts, checkHealth } = await import('../../../src/core/watchdog.js');
+      resetRestartCounts();
+
+      // Set up 4 openclaw agents on same gateway
+      const config = loadConfig();
+      const gwUrl = 'http://gw.test:18777';
+      config.agents = {
+        'oc-a': { name: 'oc-a', status: 'running', runtime: 'openclaw', openclaw: { gatewayUrl: gwUrl } },
+        'oc-b': { name: 'oc-b', status: 'running', runtime: 'openclaw', openclaw: { gatewayUrl: gwUrl } },
+        'oc-c': { name: 'oc-c', status: 'running', runtime: 'openclaw', openclaw: { gatewayUrl: gwUrl } },
+        'oc-d': { name: 'oc-d', status: 'running', runtime: 'openclaw', openclaw: { gatewayUrl: gwUrl } },
+      };
+      saveConfig(config);
+
+      // Gateway is down — healthCheck returns unhealthy for all (default mock already does this)
+      mockStart.mockClear();
+
+      const results = await restartUnhealthy({ interval: 30, maxRestarts: 5, cooldownMs: 0 });
+
+      // All 4 should be marked as restarted
+      expect(results).toHaveLength(4);
+      for (const r of results) {
+        expect(r.restarted).toBe(true);
+      }
+      // But only one start() call was made (gateway-level restart)
+      expect(mockStart).toHaveBeenCalledTimes(1);
+    });
+
+    it('should not restart gateway again within cooldown window', async () => {
+      const { restartUnhealthy, resetRestartCounts } = await import('../../../src/core/watchdog.js');
+      resetRestartCounts();
+
+      const config = loadConfig();
+      const gwUrl = 'http://gw.test:18777';
+      config.agents = {
+        'oc-x': { name: 'oc-x', status: 'running', runtime: 'openclaw', openclaw: { gatewayUrl: gwUrl } },
+        'oc-y': { name: 'oc-y', status: 'running', runtime: 'openclaw', openclaw: { gatewayUrl: gwUrl } },
+      };
+      saveConfig(config);
+
+      // Default mock returns unhealthy/gateway-down
+      mockStart.mockClear();
+
+      // First restart succeeds
+      const r1 = await restartUnhealthy({ interval: 30, maxRestarts: 5, cooldownMs: 10000 });
+      expect(r1.every((r) => r.restarted)).toBe(true);
+      expect(mockStart).toHaveBeenCalledTimes(1);
+
+      // Second attempt — within cooldown (cooldownMs * 3 = 30000)
+      const r2 = await restartUnhealthy({ interval: 30, maxRestarts: 5, cooldownMs: 10000 });
+      expect(r2.every((r) => !r.restarted)).toBe(true);
+      expect(r2[0]!.error).toContain('cooldown');
+      // No additional start call
+      expect(mockStart).toHaveBeenCalledTimes(1);
+    });
+
+    it('should restart docker and openclaw agents independently', async () => {
+      const { restartUnhealthy, resetRestartCounts } = await import('../../../src/core/watchdog.js');
+      resetRestartCounts();
+
+      const config = loadConfig();
+      const gwUrl = 'http://gw-up.test:18777';
+      // 1 docker agent (missing container → unhealthy) + 1 openclaw agent (gateway down → unhealthy)
+      config.agents = {
+        'docker-bad': { name: 'docker-bad', status: 'running' },
+        'oc-bad2': { name: 'oc-bad2', status: 'running', runtime: 'openclaw', openclaw: { gatewayUrl: gwUrl } },
+      };
+      saveConfig(config);
+
+      // Default mock already returns unhealthy/gateway-down for openclaw
+      mockStart.mockClear();
+
+      const results = await restartUnhealthy({ interval: 30, maxRestarts: 5, cooldownMs: 0 });
+
+      expect(results).toHaveLength(2);
+      const dockerResult = results.find((r) => r.name === 'docker-bad');
+      const ocResult = results.find((r) => r.name === 'oc-bad2');
+      expect(dockerResult?.restarted).toBe(true);
+      expect(ocResult?.restarted).toBe(true);
+      // openclaw start called once (gateway restart), docker start called via docker runtime
+      expect(mockStart).toHaveBeenCalledTimes(1);
     });
   });
 });

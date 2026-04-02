@@ -55,6 +55,8 @@ export function AgentTable() {
               Status${sortIcon('status')}
             </th>
             <th>Channels</th>
+            <th>Runtime</th>
+            <th>Model</th>
             <th>Actions</th>
           </tr>
         </thead>
@@ -62,7 +64,7 @@ export function AgentTable() {
           ${agents.length === 0
             ? html`
                 <tr>
-                  <td colspan="5">
+                  <td colspan="7">
                     <div class="empty-state">No agents found</div>
                   </td>
                 </tr>
@@ -81,8 +83,17 @@ export function AgentTable() {
                     </td>
                     <td>
                       <${ChannelBadge}
-                        channels=${agent.role ? [agent.role] : []}
+                        channels=${agent.channels?.map((c) => c.type) ?? (agent.role ? [agent.role] : [])}
                       />
+                      ${agent.cronCount ? html`<span class="badge badge-dim" title="Cron jobs">⏰ ${agent.cronCount}</span>` : ''}
+                      ${agent.skillsCount ? html`<span class="badge badge-dim" title="Skills">🧠 ${agent.skillsCount}</span>` : ''}
+                    </td>
+                    <td>
+                      <span class="badge badge-${agent.runtime || 'docker'}">${agent.runtime || 'docker'}</span>
+                    </td>
+                    <td>
+                      <span class="agent-model">${agent.model || '—'}</span>
+                      ${agent.modelFallbacks?.length ? html`<span class="badge badge-dim" title="Fallbacks: ${agent.modelFallbacks.join(', ')}">+${agent.modelFallbacks.length}</span>` : ''}
                     </td>
                     <td>
                       <${ActionButtons}

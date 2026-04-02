@@ -18,6 +18,7 @@ vi.mock('../../../src/core/docker.js', () => ({
 // Mock child_process
 vi.mock('child_process', () => ({
   execSync: vi.fn(),
+  execFileSync: vi.fn(),
   spawn: vi.fn().mockReturnValue({ on: vi.fn() }),
 }));
 
@@ -228,6 +229,84 @@ describe('Core Agent Module', () => {
       const statuses = await getAllAgentStatuses();
       expect(statuses).toHaveLength(2);
       expect(statuses[0]!.name).toBe('agent-a');
+    });
+  });
+
+  describe('bindChannel / unbindChannel', () => {
+    it('should bind a channel to an openclaw agent', async () => {
+      const config = loadConfig();
+      config.agents = {
+        'oc-agent': {
+          name: 'oc-agent',
+          role: 'custom',
+          runtime: 'openclaw',
+          status: 'running',
+          openclaw: { gatewayUrl: 'http://localhost:18777', workspace: 'oc-agent' },
+        },
+      };
+      saveConfig(config);
+
+      const { bindChannel } = await import('../../../src/core/agent.js');
+      await bindChannel('oc-agent', 'telegram', 'tg123');
+
+      const updated = loadConfig();
+      expect(updated.agents!['oc-agent']!.openclaw?.channels).toEqual([
+        { type: 'telegram', accountId: 'tg123' },
+      ]);
+    });
+
+    it('should unbind a channel from an openclaw agent', async () => {
+      const config = loadConfig();
+      config.agents = {
+        'oc-agent': {
+          name: 'oc-agent',
+          role: 'custom',
+          runtime: 'openclaw',
+          status: 'running',
+          openclaw: {
+            gatewayUrl: 'http://localhost:18777',
+            workspace: 'oc-agent',
+            channels: [
+              { type: 'telegram', accountId: 'tg123' },
+              { type: 'discord', accountId: 'dc456' },
+            ],
+          },
+        },
+      };
+      saveConfig(config);
+
+      const { unbindChannel } = await import('../../../src/core/agent.js');
+      await unbindChannel('oc-agent', 'telegram');
+
+      const updated = loadConfig();
+      expect(updated.agents!['oc-agent']!.openclaw?.channels).toEqual([
+        { type: 'discord', accountId: 'dc456' },
+      ]);
+    });
+
+    it('should throw when binding to a docker agent', async () => {
+      const config = loadConfig();
+      config.agents = {
+        'docker-agent': {
+          name: 'docker-agent',
+          role: 'coding',
+          runtime: 'docker',
+          status: 'running',
+        },
+      };
+      saveConfig(config);
+
+      const { bindChannel } = await import('../../../src/core/agent.js');
+      await expect(bindChannel('docker-agent', 'telegram', 'tg123'))
+        .rejects.toThrow('channel bind is only supported for openclaw agents');
+    });
+
+    it('should throw when agent not found', async () => {
+      saveConfig({ version: '1.0', agents: {} });
+
+      const { bindChannel } = await import('../../../src/core/agent.js');
+      await expect(bindChannel('nonexistent', 'telegram', 'tg123'))
+        .rejects.toThrow('not found');
     });
   });
 });

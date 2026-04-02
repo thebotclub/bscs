@@ -171,4 +171,83 @@ describe('Core Fleet Module', () => {
       expect(Object.keys(result.agents)).toHaveLength(2);
     });
   });
+
+  describe('importFromOpenClaw', () => {
+    it('should import agents from openclaw gateway', async () => {
+      // Set up initial config
+      saveConfig({ version: '1.0', agents: {} });
+
+      const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
+
+      const mockAgents = [
+        { name: 'bot-alpha', workspace: 'alpha-ws', model: 'gpt-4', channels: [{ type: 'telegram', accountId: 'tg123' }] },
+        { name: 'bot-beta', workspace: 'beta-ws', model: 'claude-3', channels: [] },
+        { name: 'bot-gamma' },
+      ];
+
+      setExecCommandForFleet((() => JSON.stringify(mockAgents)) as any);
+
+      const result = importFromOpenClaw('http://localhost:18777', { apply: true });
+      expect(result.imported).toEqual(['bot-alpha', 'bot-beta', 'bot-gamma']);
+      expect(result.skipped).toEqual([]);
+      expect(result.errors).toEqual([]);
+
+      // Verify config was written
+      const config = loadConfig();
+      expect(config.agents!['bot-alpha']).toBeDefined();
+      expect(config.agents!['bot-alpha']!.runtime).toBe('openclaw');
+      expect(config.agents!['bot-alpha']!.openclaw?.gatewayUrl).toBe('http://localhost:18777');
+      expect(config.agents!['bot-alpha']!.openclaw?.channels).toHaveLength(1);
+      expect(config.agents!['bot-beta']!.openclaw?.workspace).toBe('beta-ws');
+      expect(config.agents!['bot-gamma']!.openclaw?.workspace).toBe('bot-gamma');
+    });
+
+    it('should skip agents already in config', async () => {
+      saveConfig({
+        version: '1.0',
+        agents: {
+          existing: { name: 'existing', role: 'custom', runtime: 'docker', status: 'running' },
+        },
+      });
+
+      const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
+
+      const mockAgents = [
+        { name: 'existing' },
+        { name: 'new-agent' },
+      ];
+
+      setExecCommandForFleet((() => JSON.stringify(mockAgents)) as any);
+
+      const result = importFromOpenClaw('http://localhost:18777', { apply: true });
+      expect(result.imported).toEqual(['new-agent']);
+      expect(result.skipped).toEqual(['existing']);
+    });
+
+    it('should throw on gateway unreachable', async () => {
+      saveConfig({ version: '1.0', agents: {} });
+
+      const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
+
+      setExecCommandForFleet((() => { throw new Error('Connection refused'); }) as any);
+
+      expect(() => importFromOpenClaw('http://localhost:18777')).toThrow('Failed to query OpenClaw gateway');
+    });
+
+    it('should not write config in dry-run mode', async () => {
+      saveConfig({ version: '1.0', agents: {} });
+
+      const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
+
+      const mockAgents = [{ name: 'test-agent' }];
+      setExecCommandForFleet((() => JSON.stringify(mockAgents)) as any);
+
+      const result = importFromOpenClaw('http://localhost:18777'); // no apply
+      expect(result.imported).toEqual(['test-agent']);
+
+      // Verify config was NOT written
+      const config = loadConfig();
+      expect(config.agents!['test-agent']).toBeUndefined();
+    });
+  });
 });

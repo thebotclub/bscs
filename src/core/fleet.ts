@@ -7,18 +7,14 @@ import { dirname } from 'path';
 import { execFileSync } from 'child_process';
 import { isLocalMachine } from '../util/network.js';
 import { homedir, userInfo } from 'os';
-import { loadConfig } from './config.js';
+import { loadConfig, saveConfig } from './config.js';
 import { sshExec } from '../util/ssh.js';
 import type { AgentConfig } from '../util/types.js';
 import {
   listBscsContainers,
-  pullImage,
-  createContainer,
-  startContainer,
-  stopContainer,
-  removeContainer,
   type ContainerInfo,
 } from './docker.js';
+import { getRuntime } from './runtime/index.js';
 import { createLogger } from '../util/logger.js';
 
 const logger = createLogger('fleet');
@@ -35,6 +31,11 @@ export interface FleetAgentStatus {
   runtime?: string;
   ports?: { gateway?: number; remote?: number };
   created?: string;
+  channels?: Array<{ type: string; accountId: string }>;
+  cronCount?: number;
+  skillsCount?: number;
+  model?: string;
+  modelFallbacks?: string[];
 }
 
 export interface FleetStatusResult {
@@ -232,6 +233,21 @@ export async function getFleetStatus(includeAll = true): Promise<FleetStatusResu
           }
         }
         ports = { gateway: agentConfig.ports?.gateway };
+      } else if (runtime === 'openclaw') {
+        // OpenClaw agents — check gateway health
+        const gatewayUrl = agentConfig.openclaw?.gatewayUrl || `http://127.0.0.1:${agentConfig.ports?.gateway || 18777}`;
+        try {
+          const res = execFileSync('curl', ['-s', '--max-time', '3', `${gatewayUrl}/healthz`], {
+            encoding: 'utf8',
+            timeout: 5000,
+          });
+          status = (res.includes('"ok"') || res.includes('"live"') || res.includes('<!doctype') || res.includes('openclaw-app'))
+            ? 'running'
+            : 'stopped';
+        } catch {
+          status = 'stopped';
+        }
+        ports = { gateway: agentConfig.ports?.gateway };
       }
 
       agents.push({
@@ -244,6 +260,11 @@ export async function getFleetStatus(includeAll = true): Promise<FleetStatusResu
         runtime,
         ports: ports || { gateway: agentConfig.ports?.gateway, remote: agentConfig.ports?.remote },
         created: agentConfig.created,
+        channels: agentConfig.openclaw?.channels as Array<{ type: string; accountId: string }> | undefined,
+        cronCount: agentConfig.openclaw?.cronJobs?.length,
+        skillsCount: agentConfig.openclaw?.skills?.length,
+        model: agentConfig.model ?? agentConfig.openclaw?.model?.primary,
+        modelFallbacks: agentConfig.openclaw?.model?.fallbacks as string[] | undefined,
       });
     }
   }
@@ -303,31 +324,63 @@ export async function computeReconcileChanges(): Promise<ReconcileChange[]> {
   const config = loadConfig();
   const changes: ReconcileChange[] = [];
 
-  let containers: ContainerInfo[] = [];
+  // Docker agents — batch container comparison
+  const dockerRuntime = getRuntime('docker');
+  let containerStatuses: Array<{ name: string; status: string }> = [];
   try {
-    containers = await listBscsContainers();
+    containerStatuses = await dockerRuntime.list();
   } catch {
     throw new Error('Could not list containers');
   }
 
   const containerMap = new Map(
-    containers.map((c) => [c.name.replace('openclaw_', ''), c]),
+    containerStatuses.map((c) => [c.name, c]),
   );
 
   if (config.agents) {
-    for (const name of Object.keys(config.agents)) {
-      const container = containerMap.get(name);
-      if (!container) {
-        changes.push({ action: 'create', agent: name, reason: 'Missing container' });
-      } else if (container.status === 'stopped') {
-        changes.push({ action: 'start', agent: name, reason: 'Container stopped' });
-      } else if (container.status === 'created') {
-        changes.push({ action: 'start', agent: name, reason: 'Not started' });
+    for (const [name, agentConfig] of Object.entries(config.agents)) {
+      const runtime = agentConfig.runtime || 'docker';
+
+      if (runtime === 'docker') {
+        const container = containerMap.get(name);
+        if (!container) {
+          changes.push({ action: 'create', agent: name, reason: 'Missing container' });
+        } else if (container.status === 'stopped') {
+          changes.push({ action: 'start', agent: name, reason: 'Container stopped' });
+        } else if (container.status === 'created') {
+          changes.push({ action: 'start', agent: name, reason: 'Not started' });
+        }
+        containerMap.delete(name);
+      } else if (runtime === 'native') {
+        // Native agents — probe health
+        try {
+          const nativeRuntime = getRuntime('native', { port: agentConfig.ports?.gateway });
+          const status = await nativeRuntime.status(name);
+          if (agentConfig.status === 'running' && status.status !== 'running') {
+            changes.push({ action: 'start', agent: name, reason: 'Native agent not responding' });
+          }
+        } catch {
+          changes.push({ action: 'start', agent: name, reason: 'Health probe failed' });
+        }
+      } else if (runtime === 'openclaw') {
+        // OpenClaw agents — check gateway reachability
+        try {
+          const ocRuntime = getRuntime('openclaw', {
+            port: agentConfig.ports?.gateway,
+            gatewayUrl: agentConfig.openclaw?.gatewayUrl,
+          });
+          const status = await ocRuntime.status(name);
+          if (agentConfig.status === 'running' && status.status !== 'running') {
+            changes.push({ action: 'start', agent: name, reason: 'OpenClaw agent not responding' });
+          }
+        } catch {
+          changes.push({ action: 'start', agent: name, reason: 'Gateway probe failed' });
+        }
       }
-      containerMap.delete(name);
     }
   }
 
+  // Orphaned Docker containers
   for (const [name, container] of containerMap) {
     changes.push({
       action: container.status === 'running' ? 'stop' : 'remove',
@@ -345,20 +398,24 @@ export async function applyReconcileChange(
   const config = loadConfig();
   try {
     const agentConfig = config.agents?.[change.agent];
+    const runtimeType = agentConfig?.runtime || 'docker';
+    const runtime = getRuntime(runtimeType, {
+      port: agentConfig?.ports?.gateway,
+      gatewayUrl: agentConfig?.openclaw?.gatewayUrl,
+    });
     const image =
       agentConfig?.image || config.defaults?.image || 'openclaw-fleet:latest';
     const ports = agentConfig?.ports || { gateway: 19000, remote: 19001 };
 
     if (change.action === 'create') {
-      await pullImage(image);
-      await createContainer({ name: change.agent, image, ports });
-      await startContainer(change.agent);
+      await runtime.create(change.agent, { image, ports });
+      await runtime.start(change.agent);
     } else if (change.action === 'start') {
-      await startContainer(change.agent);
+      await runtime.start(change.agent);
     } else if (change.action === 'stop') {
-      await stopContainer(change.agent);
+      await runtime.stop(change.agent);
     } else if (change.action === 'remove') {
-      await removeContainer(change.agent);
+      await runtime.destroy(change.agent);
     }
     return { success: true };
   } catch (err) {
@@ -504,4 +561,117 @@ export function importFleetSh(fleetShPath: string): ImportResult {
     'Fleet imported',
   );
   return { configPath, fleetName, image, agents };
+}
+
+// =============================================================================
+// Import from OpenClaw Gateway
+// =============================================================================
+
+export interface OpenClawImportResult {
+  imported: string[];
+  skipped: string[];
+  errors: string[];
+}
+
+let _execCommand: typeof execFileSync = execFileSync;
+
+/** Override exec for testing. */
+export function setExecCommandForFleet(fn: typeof execFileSync): void {
+  _execCommand = fn;
+}
+
+/**
+ * Import agents from an OpenClaw gateway into BSCS config.
+ * Queries `openclaw agents list --json` and populates config entries.
+ */
+export function importFromOpenClaw(
+  gatewayUrl: string,
+  options: { apply?: boolean } = {},
+): OpenClawImportResult {
+  const config = loadConfig();
+  const result: OpenClawImportResult = { imported: [], skipped: [], errors: [] };
+
+  // Query the gateway for agent list
+  let agentsJson: string;
+  try {
+    agentsJson = _execCommand('openclaw', ['agents', 'list', '--json'], {
+      encoding: 'utf-8',
+      timeout: 15000,
+      env: { ...process.env, OPENCLAW_GATEWAY: gatewayUrl },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to query OpenClaw gateway at ${gatewayUrl}: ${msg}`);
+  }
+
+  let agents: Array<{
+    name: string;
+    workspace?: string;
+    model?: string;
+    channels?: Array<{ type: string; accountId: string }>;
+    skills?: string[];
+    cronJobs?: Array<{ id: string; cron: string; message: string; channel?: string }>;
+  }>;
+
+  try {
+    agents = JSON.parse(agentsJson);
+    if (!Array.isArray(agents)) {
+      throw new Error('Expected an array of agents');
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to parse agent list from OpenClaw gateway: ${msg}`);
+  }
+
+  config.agents = config.agents || {};
+
+  for (const agent of agents) {
+    if (!agent.name) {
+      result.errors.push('Agent entry missing name — skipped');
+      continue;
+    }
+
+    if (config.agents[agent.name]) {
+      result.skipped.push(agent.name);
+      continue;
+    }
+
+    const agentConfig: AgentConfig = {
+      name: agent.name,
+      role: 'custom',
+      template: 'custom',
+      machine: 'localhost',
+      image: '',
+      runtime: 'openclaw',
+      created: new Date().toISOString(),
+      status: 'running',
+      openclaw: {
+        gatewayUrl,
+        workspace: agent.workspace || agent.name,
+        channels: (agent.channels || []).map((ch) => ({
+          type: ch.type as 'telegram' | 'discord',
+          accountId: ch.accountId,
+        })),
+        model: agent.model ? { primary: agent.model } : undefined,
+        skills: agent.skills,
+        cronJobs: agent.cronJobs,
+      },
+    };
+
+    if (options.apply) {
+      config.agents[agent.name] = agentConfig;
+    }
+
+    result.imported.push(agent.name);
+  }
+
+  if (options.apply && result.imported.length > 0) {
+    saveConfig(config);
+    logger.info(
+      { imported: result.imported.length, skipped: result.skipped.length },
+      'OpenClaw agents imported',
+    );
+  }
+
+  return result;
 }

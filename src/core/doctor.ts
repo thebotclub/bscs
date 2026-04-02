@@ -283,6 +283,21 @@ async function checkAgentContainer(agentName: string, agentConfig: any, config: 
       autoFixable: false, fixTarget: getFixTarget(machine, config) };
   }
 
+  if (runtime === 'openclaw') {
+    // OpenClaw agents run on a shared gateway — check agent is registered
+    const gatewayUrl = agentConfig.openclaw?.gatewayUrl || `http://127.0.0.1:${agentConfig.ports?.gateway || 18789}`;
+    const cmd = remoteOrLocal(machine,
+      `curl -s --max-time 5 ${gatewayUrl}/healthz 2>/dev/null`,
+      config);
+    const result = await executeCommand(cmd);
+    if (result.ok && (result.output.includes('"ok"') || result.output.includes('"live"') || result.output.includes('"status"') || result.output.includes('<!doctype') || result.output.includes('openclaw-app'))) {
+      return { category: 'agent', target: agentName, name: 'Gateway Agent', status: 'ok', message: 'running (openclaw)' };
+    }
+    return { category: 'agent', target: agentName, name: 'Gateway Agent', status: 'error', message: 'Gateway not responding',
+      fix: `Check OpenClaw gateway at ${gatewayUrl}`,
+      autoFixable: false, fixTarget: getFixTarget(machine, config) };
+  }
+
   // Docker runtime
   const cmd = remoteOrLocal(machine,
     `export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"; docker inspect --format '{{.State.Status}}|{{.State.StartedAt}}|{{.State.Health.Status}}' ${containerName} 2>/dev/null`,
@@ -318,12 +333,33 @@ async function checkAgentContainer(agentName: string, agentConfig: any, config: 
 
 async function checkAgentGateway(agentName: string, agentConfig: any, config: BscsConfig): Promise<DoctorCheck> {
   const machine = agentConfig.machine || 'localhost';
+  const runtime = agentConfig.runtime || 'docker';
+
+  // OpenClaw agents: use the shared gateway URL from openclaw config
+  if (runtime === 'openclaw') {
+    const gatewayUrl = agentConfig.openclaw?.gatewayUrl;
+    if (!gatewayUrl) {
+      return { category: 'agent', target: agentName, name: 'Gateway', status: 'skip', message: 'No openclaw gatewayUrl configured' };
+    }
+    const cmd = remoteOrLocal(machine,
+      `curl -s --max-time 5 ${gatewayUrl}/healthz 2>/dev/null`,
+      config);
+    const result = await executeCommand(cmd);
+    const output = (result.output || '').toLowerCase();
+    if (result.ok && (output.includes('"ok"') || output.includes('"live"') || output.includes('"status"') || output.includes('<!doctype') || output.includes('openclaw-app'))) {
+      return { category: 'agent', target: agentName, name: 'Gateway', status: 'ok', message: 'Responding (shared gateway)' };
+    }
+    const ft = getFixTarget(machine, config);
+    return { category: 'agent', target: agentName, name: 'Gateway', status: 'error', message: 'Shared gateway not responding',
+      details: (result.output || 'No response').substring(0, 200),
+      fix: `Check OpenClaw gateway at ${gatewayUrl}`, autoFixable: false, fixTarget: ft };
+  }
+
   const gwPort = agentConfig.ports?.gateway;
   if (!gwPort) {
     return { category: 'agent', target: agentName, name: 'Gateway', status: 'skip', message: 'No gateway port configured' };
   }
 
-  const runtime = agentConfig.runtime || 'docker';
   const containerName = agentConfig.container || `openclaw_${agentName}`;
   const pathPrefix = 'export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"; ';
 
@@ -373,7 +409,7 @@ async function checkAgentUptime(agentName: string, agentConfig: any, config: Bsc
   const containerName = agentConfig.container || `openclaw_${agentName}`;
 
   if (runtime !== 'docker') {
-    return { category: 'agent', target: agentName, name: 'Uptime', status: 'skip', message: 'Native agent — uptime N/A' };
+    return { category: 'agent', target: agentName, name: 'Uptime', status: 'skip', message: `${runtime} agent — uptime N/A` };
   }
 
   const cmd = remoteOrLocal(machine,
@@ -513,6 +549,11 @@ async function checkAgentErrors(agentName: string, agentConfig: any, config: Bsc
     cmd = remoteOrLocal(machine,
       `export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"; docker logs --tail 50 ${containerName} 2>&1 | grep -ci "error" 2>/dev/null || echo 0`,
       config);
+  } else if (runtime === 'openclaw') {
+    const workspace = agentConfig.openclaw?.workspace || agentName;
+    cmd = remoteOrLocal(machine,
+      `tail -50 ~/Library/Logs/openclaw/${workspace}.log 2>/dev/null | grep -ci "error" || echo 0`,
+      config);
   } else {
     cmd = remoteOrLocal(machine,
       `tail -50 ~/Library/Logs/openclaw/${agentName}.log 2>/dev/null | grep -ci "error" || echo 0`,
@@ -543,6 +584,11 @@ async function checkAgentRateLimiting(agentName: string, agentConfig: any, confi
     cmd = remoteOrLocal(machine,
       `export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"; docker logs --tail 100 ${containerName} 2>&1 | grep -ci "rate_limit\\|429" 2>/dev/null || echo 0`,
       config);
+  } else if (runtime === 'openclaw') {
+    const workspace = agentConfig.openclaw?.workspace || agentName;
+    cmd = remoteOrLocal(machine,
+      `tail -100 ~/Library/Logs/openclaw/${workspace}.log 2>/dev/null | grep -ci "rate_limit\\|429" || echo 0`,
+      config);
   } else {
     cmd = remoteOrLocal(machine,
       `tail -100 ~/Library/Logs/openclaw/${agentName}.log 2>/dev/null | grep -ci "rate_limit\\|429" || echo 0`,
@@ -570,6 +616,11 @@ async function checkAgentChannelStatus(agentName: string, agentConfig: any, conf
     cmd = remoteOrLocal(machine,
       `export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"; docker logs --tail 200 ${containerName} 2>&1 | grep -i "starting provider\\|channel.*connect\\|telegram\\|discord" | tail -3 2>/dev/null`,
       config);
+  } else if (runtime === 'openclaw') {
+    const workspace = agentConfig.openclaw?.workspace || agentName;
+    cmd = remoteOrLocal(machine,
+      `tail -200 ~/Library/Logs/openclaw/${workspace}.log 2>/dev/null | grep -i "starting provider\\|channel.*connect\\|telegram\\|discord" | tail -3`,
+      config);
   } else {
     cmd = remoteOrLocal(machine,
       `tail -200 ~/Library/Logs/openclaw/${agentName}.log 2>/dev/null | grep -i "starting provider\\|channel.*connect\\|telegram\\|discord" | tail -3`,
@@ -589,7 +640,7 @@ async function checkAgentResources(agentName: string, agentConfig: any, config: 
   const machine = agentConfig.machine || 'localhost';
   const runtime = agentConfig.runtime || 'docker';
   if (runtime !== 'docker') {
-    return { category: 'agent', target: agentName, name: 'Resources', status: 'skip', message: 'Native agent' };
+    return { category: 'agent', target: agentName, name: 'Resources', status: 'skip', message: `${runtime} agent` };
   }
   const containerName = agentConfig.container || `openclaw_${agentName}`;
 
@@ -616,6 +667,9 @@ async function checkSubDoctor(agentName: string, agentConfig: any, config: BscsC
     cmd = remoteOrLocal(machine,
       `export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"; docker exec ${containerName} openclaw doctor 2>&1 | tail -5`,
       config);
+  } else if (runtime === 'openclaw') {
+    const workspace = agentConfig.openclaw?.workspace || agentName;
+    cmd = remoteOrLocal(machine, `openclaw doctor --workspace ${workspace} 2>&1 | tail -5`, config);
   } else {
     cmd = remoteOrLocal(machine, 'openclaw doctor 2>&1 | tail -5', config);
   }

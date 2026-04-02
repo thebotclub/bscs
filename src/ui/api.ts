@@ -15,6 +15,11 @@ export interface AgentStatus {
   model?: string;
   role?: string;
   health: string;
+  runtime?: string;
+  channels?: Array<{ type: string; accountId: string }>;
+  cronCount?: number;
+  skillsCount?: number;
+  modelFallbacks?: string[];
 }
 
 export interface MachineInfo {

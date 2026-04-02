@@ -18,6 +18,13 @@ import {
   type TribunalSetupResult,
   getResourcesForRole,
   getModelForRole,
+  addCronJob,
+  removeCronJob,
+  listCronJobs,
+  addSkill,
+  removeSkill,
+  listSkills,
+  setIdentity,
 } from '../../core/agent.js';
 import { createLogger } from '../../util/logger.js';
 import { withErrorHandler } from '../../util/errors.js';
@@ -33,6 +40,9 @@ export function createAgentCreateCommand(): Command {
     .option('-i, --image <image>', 'Docker image to use')
     .option('-r, --role <role>', 'Agent role (coding, brain, review, security, ops, custom)', 'custom')
     .option('-m, --model <model>', 'Model to use (overrides role default)')
+    .option('--runtime <runtime>', 'Runtime type (docker, native, openclaw)', 'docker')
+    .option('--bind <bindings...>', 'Channel bindings for openclaw (format: type:accountId)')
+    .option('--gateway-url <url>', 'OpenClaw gateway URL (for --runtime openclaw)')
     .option('--no-start', 'Create without starting')
     .option('--dry-run', 'Preview what would be created without making changes')
     .option('--json', 'Output as JSON')
@@ -40,13 +50,115 @@ export function createAgentCreateCommand(): Command {
       image?: string; 
       role: AgentRole;
       model?: string;
+      runtime: string;
+      bind?: string[];
+      gatewayUrl?: string;
       noStart?: boolean; 
       dryRun?: boolean;
       json?: boolean;
     }) => {
       await withErrorHandler(async () => {
+      const { role, model, runtime, noStart, dryRun, json } = options;
+
+      // ── OpenClaw runtime path ──
+      if (runtime === 'openclaw') {
+        const gatewayUrl = options.gatewayUrl || 'http://127.0.0.1:18777';
+
+        // Validate gateway URL
+        try {
+          const parsed = new URL(gatewayUrl);
+          if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+            console.error(chalk.red(`Invalid gateway URL protocol "${parsed.protocol}". Only http: and https: are supported.`));
+            process.exit(1);
+          }
+        } catch {
+          console.error(chalk.red(`Invalid gateway URL "${gatewayUrl}". Must be a valid URL.`));
+          process.exit(1);
+        }
+        const bindings = (options.bind || []).map((b) => {
+          const [type, ...rest] = b.split(':');
+          const accountId = rest.join(':');
+          if (!type || !accountId || (type !== 'telegram' && type !== 'discord')) {
+            console.error(chalk.red(`Invalid binding "${b}". Format: telegram:accountId or discord:accountId`));
+            process.exit(1);
+          }
+          return { type: type as 'telegram' | 'discord', accountId };
+        });
+
+        logger.debug({ name, role, model, gatewayUrl, bindings }, 'Creating openclaw agent');
+
+        const config = loadConfig();
+        if (config.agents?.[name]) {
+          console.error(chalk.red(`Agent "${name}" already exists`));
+          process.exit(1);
+        }
+
+        if (dryRun) {
+          console.log(chalk.cyan('\n🔍 Dry run - preview of openclaw agent creation:\n'));
+          console.log(chalk.dim(`Name:       ${name}`));
+          console.log(chalk.dim(`Role:       ${role}`));
+          console.log(chalk.dim(`Runtime:    openclaw`));
+          console.log(chalk.dim(`Gateway:    ${gatewayUrl}`));
+          console.log(chalk.dim(`Model:      ${model || 'default'}`));
+          if (bindings.length > 0) {
+            console.log(chalk.dim(`Channels:   ${bindings.map((b) => `${b.type}:${b.accountId}`).join(', ')}`));
+          }
+          console.log(chalk.green('\nTo actually create, run without --dry-run'));
+          return;
+        }
+
+        try {
+          const { getRuntime: getRT } = await import('../../core/runtime/index.js');
+          const rt = getRT('openclaw', { gatewayUrl }) as import('../../core/runtime/openclaw.js').OpenClawRuntime;
+          await rt.create(name, { image: '' });
+
+          // Bind channels
+          for (const binding of bindings) {
+            await rt.bindChannel(name, binding.type, binding.accountId);
+          }
+
+          // Save to config
+          config.agents = config.agents || {};
+          config.agents[name] = {
+            name,
+            role,
+            template: role === 'coding' ? 'coding' : 'custom',
+            machine: 'localhost',
+            image: '',
+            runtime: 'openclaw',
+            created: new Date().toISOString(),
+            status: 'running',
+            openclaw: {
+              gatewayUrl,
+              workspace: name,
+              channels: bindings,
+              model: model ? { primary: model } : undefined,
+            },
+          };
+          if (model) {
+            config.agents[name]!.model = model;
+          }
+          saveConfig(config);
+
+          const result = { name, runtime: 'openclaw', role, model, gatewayUrl, channels: bindings, status: 'running' };
+          if (json) {
+            console.log(JSON.stringify(result, null, 2));
+          } else {
+            console.log(chalk.green(`✓ OpenClaw agent "${name}" created`));
+            if (bindings.length > 0) {
+              console.log(chalk.dim(`  Channels: ${bindings.map((b) => `${b.type}:${b.accountId}`).join(', ')}`));
+            }
+          }
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(chalk.red(`Failed to create openclaw agent: ${message}`));
+          process.exit(1);
+        }
+        return;
+      }
+
+      // ── Docker runtime path (existing logic) ──
       await requireDocker();
-      const { role, model, noStart, dryRun, json } = options;
       
       logger.debug({ name, options }, 'Creating agent');
       
@@ -550,7 +662,175 @@ export function createAgentShellCommand(): Command {
     });
 }
 
+// ── Channel Bind/Unbind Commands ──────────────────────────────────────
+
+export function createAgentBindCommand(): Command {
+  return new Command('bind')
+    .description('Bind a channel to an OpenClaw agent')
+    .argument('<name>', 'Agent name')
+    .requiredOption('--channel <type>', 'Channel type (telegram, discord)')
+    .requiredOption('--account-id <id>', 'Channel account ID')
+    .action(async (name: string, options: { channel: string; accountId: string }) => {
+      await withErrorHandler(async () => {
+      const channelType = options.channel;
+      if (channelType !== 'telegram' && channelType !== 'discord') {
+        console.error(chalk.red(`Invalid channel type "${channelType}". Must be "telegram" or "discord".`));
+        process.exit(1);
+      }
+
+      const { bindChannel } = await import('../../core/agent.js');
+      await bindChannel(name, channelType, options.accountId);
+      console.log(chalk.green(`✓ Bound ${channelType} channel to agent "${name}"`));
+      });
+    });
+}
+
+export function createAgentUnbindCommand(): Command {
+  return new Command('unbind')
+    .description('Unbind a channel from an OpenClaw agent')
+    .argument('<name>', 'Agent name')
+    .requiredOption('--channel <type>', 'Channel type (telegram, discord)')
+    .action(async (name: string, options: { channel: string }) => {
+      await withErrorHandler(async () => {
+      const channelType = options.channel;
+      if (channelType !== 'telegram' && channelType !== 'discord') {
+        console.error(chalk.red(`Invalid channel type "${channelType}". Must be "telegram" or "discord".`));
+        process.exit(1);
+      }
+
+      const { unbindChannel } = await import('../../core/agent.js');
+      await unbindChannel(name, channelType);
+      console.log(chalk.green(`✓ Unbound ${channelType} channel from agent "${name}"`));
+      });
+    });
+}
+
 // Create the agent command group
+export function createAgentCronCommand(): Command {
+  const command = new Command('cron')
+    .description('Manage cron jobs for an openclaw agent');
+
+  command.addCommand(
+    new Command('add')
+      .description('Add a cron job')
+      .argument('<name>', 'Agent name')
+      .requiredOption('--id <id>', 'Unique cron job identifier')
+      .requiredOption('--cron <expression>', 'Cron expression')
+      .requiredOption('--message <message>', 'Message to send on schedule')
+      .option('--channel <channel>', 'Target channel')
+      .action(async (name: string, options: { id: string; cron: string; message: string; channel?: string }) => {
+        await withErrorHandler(async () => {
+          addCronJob(name, { id: options.id, cron: options.cron, message: options.message, channel: options.channel });
+          console.log(chalk.green(`✓ Cron job "${options.id}" added to agent "${name}"`));
+        });
+      }),
+  );
+
+  command.addCommand(
+    new Command('list')
+      .description('List cron jobs for an agent')
+      .argument('<name>', 'Agent name')
+      .option('--json', 'Output as JSON')
+      .action(async (name: string, options: { json?: boolean }) => {
+        await withErrorHandler(async () => {
+          const jobs = listCronJobs(name);
+          if (options.json) {
+            console.log(JSON.stringify(jobs, null, 2));
+          } else if (jobs.length === 0) {
+            console.log(chalk.dim('No cron jobs configured'));
+          } else {
+            for (const job of jobs) {
+              console.log(`  ${chalk.cyan(job.id)}  ${chalk.dim(job.cron)}  ${job.message}${job.channel ? chalk.dim(` → ${job.channel}`) : ''}`);
+            }
+          }
+        });
+      }),
+  );
+
+  command.addCommand(
+    new Command('remove')
+      .description('Remove a cron job')
+      .argument('<name>', 'Agent name')
+      .requiredOption('--id <id>', 'Cron job identifier to remove')
+      .action(async (name: string, options: { id: string }) => {
+        await withErrorHandler(async () => {
+          removeCronJob(name, options.id);
+          console.log(chalk.green(`✓ Cron job "${options.id}" removed from agent "${name}"`));
+        });
+      }),
+  );
+
+  return command;
+}
+
+export function createAgentSkillsCommand(): Command {
+  const command = new Command('skills')
+    .description('Manage skills for an openclaw agent');
+
+  command.addCommand(
+    new Command('add')
+      .description('Add a skill to an agent')
+      .argument('<name>', 'Agent name')
+      .argument('<skill>', 'Skill name')
+      .action(async (name: string, skill: string) => {
+        await withErrorHandler(async () => {
+          addSkill(name, skill);
+          console.log(chalk.green(`✓ Skill "${skill}" added to agent "${name}"`));
+        });
+      }),
+  );
+
+  command.addCommand(
+    new Command('list')
+      .description('List skills for an agent')
+      .argument('<name>', 'Agent name')
+      .option('--json', 'Output as JSON')
+      .action(async (name: string, options: { json?: boolean }) => {
+        await withErrorHandler(async () => {
+          const skills = listSkills(name);
+          if (options.json) {
+            console.log(JSON.stringify(skills, null, 2));
+          } else if (skills.length === 0) {
+            console.log(chalk.dim('No skills configured'));
+          } else {
+            for (const skill of skills) {
+              console.log(`  ${chalk.cyan('•')} ${skill}`);
+            }
+          }
+        });
+      }),
+  );
+
+  command.addCommand(
+    new Command('remove')
+      .description('Remove a skill from an agent')
+      .argument('<name>', 'Agent name')
+      .argument('<skill>', 'Skill name')
+      .action(async (name: string, skill: string) => {
+        await withErrorHandler(async () => {
+          removeSkill(name, skill);
+          console.log(chalk.green(`✓ Skill "${skill}" removed from agent "${name}"`));
+        });
+      }),
+  );
+
+  return command;
+}
+
+export function createAgentIdentityCommand(): Command {
+  return new Command('identity')
+    .description('Set agent identity (display name + emoji)')
+    .argument('<name>', 'Agent name')
+    .requiredOption('--name <displayName>', 'Display name')
+    .requiredOption('--emoji <emoji>', 'Emoji character')
+    .action(async (agentName: string, options: { name: string; emoji: string }) => {
+      await withErrorHandler(async () => {
+        setIdentity(agentName, options.name, options.emoji);
+        console.log(chalk.green(`✓ Identity set for agent "${agentName}": ${options.emoji} ${options.name}`));
+      });
+    });
+}
+
 export function createAgentCommand(): Command {
   const command = new Command('agent')
     .description('Manage agent containers');
@@ -563,6 +843,11 @@ export function createAgentCommand(): Command {
   command.addCommand(createAgentRestartCommand());
   command.addCommand(createAgentLogsCommand());
   command.addCommand(createAgentShellCommand());
+  command.addCommand(createAgentBindCommand());
+  command.addCommand(createAgentUnbindCommand());
+  command.addCommand(createAgentCronCommand());
+  command.addCommand(createAgentSkillsCommand());
+  command.addCommand(createAgentIdentityCommand());
   
   return command;
 }
