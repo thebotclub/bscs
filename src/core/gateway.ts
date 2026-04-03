@@ -11,7 +11,7 @@
 import { createServer, type IncomingMessage, type Server } from 'http';
 import { createLogger } from '../util/logger.js';
 import { loadConfig } from './config.js';
-import { recordCostEntry } from './cost.js';
+import { getBudgetStatus, recordCostEntry } from './cost.js';
 import type { ProviderType } from '../util/types.js';
 
 const logger = createLogger('gateway');
@@ -34,6 +34,8 @@ interface ResolvedProvider {
   type: ProviderType;
   apiKey?: string;
   baseUrl: string;
+  /** The actual model name to send to the provider (may differ from request model) */
+  resolvedModel: string;
 }
 
 const MODEL_PROVIDER_MAP: Record<string, ProviderType> = {
@@ -42,6 +44,11 @@ const MODEL_PROVIDER_MAP: Record<string, ProviderType> = {
   'o1-': 'openai',
   'o3-': 'openai',
   'gemini-': 'google',
+};
+
+// Map request model names to actual provider model names
+const MODEL_ALIASES: Record<string, string> = {
+  'Qwen3-8B-AWQ': '/model',
 };
 
 function inferProviderFromModel(model: string): ProviderType | null {
@@ -73,6 +80,7 @@ function resolveProvider(model: string): ResolvedProvider | null {
           type: provider.type,
           apiKey: provider.apiKey,
           baseUrl: provider.baseUrl ?? PROVIDER_ENDPOINTS[provider.type],
+          resolvedModel: candidate,
         };
       }
     }
@@ -87,6 +95,7 @@ function resolveProvider(model: string): ResolvedProvider | null {
             type: provider.type,
             apiKey: provider.apiKey,
             baseUrl: provider.baseUrl ?? PROVIDER_ENDPOINTS[provider.type],
+            resolvedModel: candidate,
           };
         }
       }
@@ -100,6 +109,7 @@ function resolveProvider(model: string): ResolvedProvider | null {
     name: inferredType,
     type: inferredType,
     baseUrl: PROVIDER_ENDPOINTS[inferredType],
+    resolvedModel: model,
   };
 }
 
@@ -117,6 +127,15 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   'o3-mini': { input: 1.1, output: 4.4 },
   'gemini-2.0-flash': { input: 0.1, output: 0.4 },
   'gemini-2.5-pro': { input: 1.25, output: 10.0 },
+  // Custom providers
+  'MiniMax-M2.7': { input: 0.50, output: 0.50 },
+  'MiniMax-M2.7-highspeed': { input: 0.30, output: 0.30 },
+  'glm-5': { input: 0.50, output: 0.50 },
+  'glm-5-turbo': { input: 0.10, output: 0.10 },
+  'mimo-v2-pro': { input: 0.50, output: 0.50 },
+  'deepseek-coder-v2-lite': { input: 0, output: 0 },
+  'Qwen/Qwen2.5-72B-Instruct-GPTQ-Int4': { input: 0, output: 0 },
+  'Qwen3-8B-AWQ': { input: 0, output: 0 },
 };
 
 function estimateCost(model: string, inputTokens: number, outputTokens: number): number {
@@ -284,13 +303,16 @@ function buildOpenAIRequest(
   provider: ResolvedProvider,
   body: Record<string, unknown>,
 ): ProviderRequest {
+  // Use the provider's resolved model name, with alias mapping
+  const resolved = MODEL_ALIASES[provider.resolvedModel] ?? provider.resolvedModel;
+  const payload = { ...body, model: resolved };
   return {
     url: `${provider.baseUrl}/chat/completions`,
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${provider.apiKey ?? ''}`,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(payload),
   };
 }
 
@@ -537,6 +559,23 @@ export async function startGateway(
 
         // Extract agent name from custom header or default
         const agentName = (req.headers['x-bscs-agent'] as string) ?? 'unknown';
+
+        // Budget enforcement — reject if daily budget is exceeded
+        const budgetStatus = getBudgetStatus();
+        if (budgetStatus !== null && budgetStatus.spent >= budgetStatus.limit) {
+          logger.warn(
+            { agent: agentName, model: body.model, limit: budgetStatus.limit, spent: budgetStatus.spent },
+            'Request rejected: daily budget exceeded',
+          );
+          res.writeHead(429, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            error: {
+              type: 'budget_exceeded',
+              message: `Daily budget of $${budgetStatus.limit.toFixed(2)} exceeded (spent $${budgetStatus.spent.toFixed(2)})`,
+            },
+          }));
+          return;
+        }
 
         // Streaming path — uses fallback chain (C-02)
         if (body.stream === true) {
