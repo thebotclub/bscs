@@ -1,7 +1,7 @@
 FROM node:22-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 COPY . .
 RUN npm run build
 
@@ -10,6 +10,6 @@ WORKDIR /app
 RUN addgroup -S bscs && adduser -S bscs -G bscs
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package*.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --ignore-scripts
 USER bscs
 ENTRYPOINT ["node", "dist/bin/bscs.js"]
