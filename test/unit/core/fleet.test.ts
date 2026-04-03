@@ -15,6 +15,22 @@ vi.mock('../../../src/core/docker.js', () => ({
   removeContainer: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Helper to normalize raw OpenClaw API data (with id) to listAgents format (with name)
+function normalizeListAgents(raw: Array<Record<string, unknown>>): Array<{ name: string; enabled: boolean; channels?: Array<{ type: string; accountId: string }>; model?: string }> {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((a) => ({
+    name: (a.id as string) || (a.name as string) || 'unknown',
+    enabled: a.enabled !== false,
+    channels: Array.isArray(a.channels)
+      ? (a.channels as Array<{ type: string; accountId?: string; id?: string }>).map((c) => ({
+          type: c.type,
+          accountId: c.accountId || c.id || '',
+        }))
+      : undefined,
+    model: typeof a.model === 'string' ? a.model : undefined,
+  }));
+}
+
 // Mock runtime module for OpenClaw drift detection tests
 const mockListAgents = vi.fn().mockResolvedValue([]);
 const mockBindChannel = vi.fn().mockResolvedValue(undefined);
@@ -333,9 +349,9 @@ describe('Core Fleet Module', () => {
       // Gateway says agent is running but channels differ
       mockOcRuntime.status.mockResolvedValueOnce({ name: 'drift-agent', status: 'running' });
       mockListAgents
-        .mockResolvedValueOnce([{ name: 'drift-agent', enabled: true, channels: [{ type: 'discord', accountId: 'dc1' }] }])
+        .mockResolvedValueOnce(normalizeListAgents([{ id: 'drift-agent', enabled: true, channels: [{ type: 'discord', accountId: 'dc1' }] }]))
         // Second call for orphan check on same gateway
-        .mockResolvedValueOnce([{ name: 'drift-agent', enabled: true }]);
+        .mockResolvedValueOnce(normalizeListAgents([{ id: 'drift-agent', enabled: true }]));
 
       const changes = await computeReconcileChanges();
       const rebind = changes.find((c) => c.action === 'rebind');
@@ -365,8 +381,8 @@ describe('Core Fleet Module', () => {
 
       mockOcRuntime.status.mockResolvedValueOnce({ name: 'model-agent', status: 'running' });
       mockListAgents
-        .mockResolvedValueOnce([{ name: 'model-agent', enabled: true, model: 'claude-3' }])
-        .mockResolvedValueOnce([{ name: 'model-agent', enabled: true }]);
+        .mockResolvedValueOnce(normalizeListAgents([{ id: 'model-agent', enabled: true, model: 'claude-3' }]))
+        .mockResolvedValueOnce(normalizeListAgents([{ id: 'model-agent', enabled: true }]));
 
       const changes = await computeReconcileChanges();
       const configUpdate = changes.find((c) => c.action === 'config-update');
@@ -396,8 +412,8 @@ describe('Core Fleet Module', () => {
 
       mockOcRuntime.status.mockResolvedValueOnce({ name: 'same-model', status: 'running' });
       mockListAgents
-        .mockResolvedValueOnce([{ name: 'same-model', enabled: true, model: 'gpt-4' }])
-        .mockResolvedValueOnce([{ name: 'same-model', enabled: true }]);
+        .mockResolvedValueOnce(normalizeListAgents([{ id: 'same-model', enabled: true, model: 'gpt-4' }]))
+        .mockResolvedValueOnce(normalizeListAgents([{ id: 'same-model', enabled: true }]));
 
       const changes = await computeReconcileChanges();
       expect(changes.filter((c) => c.action === 'config-update')).toHaveLength(0);
@@ -421,12 +437,12 @@ describe('Core Fleet Module', () => {
 
       mockOcRuntime.status.mockResolvedValueOnce({ name: 'known-agent', status: 'running' });
       // Per-agent listAgents call (no drift)
-      mockListAgents.mockResolvedValueOnce([{ name: 'known-agent', enabled: true }]);
+      mockListAgents.mockResolvedValueOnce(normalizeListAgents([{ id: 'known-agent', enabled: true }]));
       // Orphan check call — gateway has an extra agent
-      mockListAgents.mockResolvedValueOnce([
-        { name: 'known-agent', enabled: true },
-        { name: 'rogue-agent', enabled: true },
-      ]);
+      mockListAgents.mockResolvedValueOnce(normalizeListAgents([
+        { id: 'known-agent', enabled: true },
+        { id: 'rogue-agent', enabled: true },
+      ]));
 
       const changes = await computeReconcileChanges();
       const orphaned = changes.find((c) => c.action === 'orphaned');
@@ -456,9 +472,9 @@ describe('Core Fleet Module', () => {
       });
 
       // Live agent has discord bound — should be unbound first
-      mockListAgents.mockResolvedValueOnce([
-        { name: 'rebind-agent', enabled: true, channels: [{ type: 'discord', accountId: 'dc1' }] },
-      ]);
+      mockListAgents.mockResolvedValueOnce(normalizeListAgents([
+        { id: 'rebind-agent', enabled: true, channels: [{ type: 'discord', accountId: 'dc1' }] },
+      ]));
 
       const result = await applyReconcileChange({ action: 'rebind', agent: 'rebind-agent', reason: 'Channel mismatch' });
       expect(result.success).toBe(true);

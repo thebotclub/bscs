@@ -663,6 +663,18 @@ export function setExecCommandForFleet(fn: typeof execFileSync): void {
 }
 
 /**
+ * Extract fallback model names from an agent details object.
+ * Handles both `fallbackModels` (array) and `fallbacks` (array) field names.
+ */
+function extractFallbacks(agentDetails: Record<string, unknown> | null): string[] | undefined {
+  if (!agentDetails) return undefined;
+  const raw = (agentDetails.fallbackModels ?? agentDetails.fallbacks) as unknown;
+  if (!Array.isArray(raw)) return undefined;
+  const mapped = raw.map(String).filter(Boolean);
+  return mapped.length > 0 ? mapped : undefined;
+}
+
+/**
  * Import agents from an OpenClaw gateway into BSCS config.
  * Queries `openclaw agents list --json` and populates config entries.
  */
@@ -714,6 +726,26 @@ export function importFromOpenClaw(
       continue;
     }
 
+    // Fetch per-agent details (channels, fallback models) via agents get
+    let agentDetails: Record<string, unknown> | null = null;
+    try {
+      const detailsJson = _execCommand('openclaw', ['agents', 'get', '--json', name], {
+        encoding: 'utf-8',
+        timeout: 10000,
+        env: { ...process.env, OPENCLAW_GATEWAY: gatewayUrl },
+      });
+      agentDetails = JSON.parse(detailsJson);
+    } catch {
+      // Individual agent detail fetch failed — continue without channels/fallbacks
+      logger.debug({ name }, 'Could not fetch agent details, skipping channel/fallback import');
+    }
+
+    // Extract channel bindings from the detailed response
+    const rawChannels = agentDetails?.channels as Array<{ type: string; accountId?: string; id?: string }> | undefined;
+    const channels = Array.isArray(rawChannels)
+      ? rawChannels.map((c) => ({ type: c.type, accountId: c.accountId || c.id || '' }))
+      : [];
+
     const agentConfig: AgentConfig = {
       name,
       role: 'custom',
@@ -722,18 +754,18 @@ export function importFromOpenClaw(
       image: '',
       runtime: 'openclaw',
       created: new Date().toISOString(),
-      status: 'running',
+      status: (agent.enabled !== false) ? 'running' : 'stopped',
       openclaw: {
         gatewayUrl,
         workspace: (agent.workspace as string) || name,
-        model: agent.model ? { primary: agent.model as string } : undefined,
+        model: agent.model ? { primary: agent.model as string, fallbacks: extractFallbacks(agentDetails) } : (agentDetails?.model ? { primary: String(agentDetails.model), fallbacks: extractFallbacks(agentDetails) } : undefined),
         identity: (agent.identityName && agent.identityEmoji)
           ? {
               name: (agent.identityName as string).replace(/[\p{Emoji}\s]/gu, '').trim() || name,
               emoji: (agent.identityEmoji as string).trim(),
             }
           : undefined,
-        channels: [],
+        channels,
         skills: Array.isArray(agent.skills) ? agent.skills.map(String) : undefined,
         cronJobs: Array.isArray(agent.cronJobs) ? agent.cronJobs.map((cj: Record<string, unknown>) => ({
           id: String(cj.id),

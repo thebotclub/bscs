@@ -248,7 +248,19 @@ export class OpenClawRuntime implements OpenClawAgentRuntime {
   async listAgents(): Promise<Array<{ name: string; enabled: boolean; channels?: Array<{ type: string; accountId: string }>; model?: string }>> {
     try {
       const output = this.exec('openclaw', ['agents', 'list', '--json'], { timeout: 10000 });
-      return JSON.parse(output);
+      const raw: Array<Record<string, unknown>> = JSON.parse(output);
+      if (!Array.isArray(raw)) return [];
+      return raw.map((a) => ({
+        name: (a.id as string) || (a.name as string) || 'unknown',
+        enabled: a.enabled !== false,
+        channels: Array.isArray(a.channels)
+          ? a.channels.map((c: { type: string; accountId?: string; id?: string }) => ({
+              type: c.type,
+              accountId: c.accountId || c.id || '',
+            }))
+          : undefined,
+        model: typeof a.model === 'string' ? a.model : undefined,
+      }));
     } catch {
       return [];
     }
