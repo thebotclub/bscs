@@ -99,9 +99,9 @@ bscs doctor
 
 ## Remaining Issues
 
-### ISSUE-1: Channel bindings not populated in import
+### ISSUE-1: ~~Channel bindings not populated in import~~ FIXED
 
-`openclaw agents list --json` returns `bindings: 1` (count) but not the actual channel types/account IDs. The `channels` array in BSCS config is empty after import. Need a separate command or API call to resolve bindings.
+`openclaw agents list --json` returns `bindings: 1` (count) but not the actual channel types/account IDs. Fixed by making a per-agent follow-up call to `openclaw agents get --json <name>` which returns full details including channels.
 
 ### ISSUE-2: Skills not returned by `agents list`
 
@@ -111,13 +111,54 @@ The OpenClaw `agents list` output doesn't include skills. The BSCS `openclaw.ski
 
 Same as skills — cron jobs aren't in the agent list output. BSCS has `openclaw.cronJobs` schema ready but nothing to populate it from. Could read from `~/.openclaw/cron/jobs.json` directly.
 
-### ISSUE-4: Cost tracking requires agents to route through BSCS gateway
+### ISSUE-4: ~~Cost tracking requires agents to route through BSCS gateway~~ RESOLVED
 
-The BSCS LLM gateway (port 18999) only tracks costs for requests it proxies. Agents talking directly to Anthropic/MiniMax via the OpenClaw gateway (port 18777) are invisible to cost tracking. Routing agents through BSCS requires understanding how OpenClaw resolves model endpoints.
+All agents now route through BSCS gateway (Phase 2). Cost tracking works for proxied requests.
 
-### ISSUE-5: Test mocks don't match real OpenClaw API
+### ISSUE-5: ~~Test mocks don't match real OpenClaw API~~ FIXED
 
-Unit tests for `importFromOpenClaw` used `{ name: "..." }` format. Real API returns `{ id: "..." }`. Tests now updated but need a fixture file or constant that mirrors the real response schema to prevent future drift.
+Drift detection tests now use `{ id: "..." }` raw API format with `normalizeListAgents()` helper.
+
+### ISSUE-6: Docker bridge DNS broken on HQ (NOT FIXED — requires sudo)
+
+HQ's default Docker `bridge` network has `"invalid Prefix"` in IPAM config, breaking container name resolution. Workaround: custom `bscs-net` network. Root fix: `sudo systemctl restart docker` (requires downtime for all containers).
+
+---
+
+## Bugs Fixed in This Session (2026-04-03)
+
+### BUG-10: importFromOpenClaw() hardcodes channels: []
+
+**Fix:** Makes per-agent follow-up call to `openclaw agents get --json <name>` to fetch full details including channel bindings. Extracts `channels` array from the detailed response.
+
+### BUG-11: listAgents() returns raw API data without normalizing id→name
+
+**Fix:** Normalizes raw JSON response same way `list()` does: `a.id || a.name || 'unknown'`. Also extracts channels, enabled, and model fields.
+
+### BUG-12: Drift detection fails when listAgents() returns id not name
+
+**Fix:** Consequence of BUG-11 fix. Drift detection at fleet.ts line 394 does `liveAgent.name === name` which now works because `listAgents()` normalizes properly.
+
+### BUG-13: Import always sets status 'running' regardless of enabled state
+
+**Fix:** Uses `agent.enabled !== false` to determine running/stopped status during import.
+
+### BUG-14: Import doesn't extract fallback models
+
+**Fix:** Added `extractFallbacks()` helper that checks both `fallbackModels` and `fallbacks` field names from agent details.
+
+### BUG-15: Transitive dependency vulnerabilities
+
+**Fix:** `npm audit fix` upgraded lodash-es to 4.18.1. Added `overrides` in package.json for picomatch ^4.0.4 and brace-expansion ^2.0.3. Result: 0 vulnerabilities.
+
+### BUG-16: No compose file for BSCS gateway deployment
+
+**Fix:** Added `docker-compose.yml`, `docker-compose.hq.yml` (HQ override), and `.env.example`. Gateway now deployable via `docker compose up -d` instead of manual `docker run`.
+
+## Full Test Results
+
+- **42 test files, 402 tests, all passing**
+- **0 npm audit vulnerabilities**
 
 ---
 
