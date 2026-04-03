@@ -128,7 +128,7 @@ async function createTestServer() {
   server.tool('cron_add', 'Add cron job', {
     name: z.string().min(2).max(31).regex(/^[a-z][a-z0-9-]*$/),
     id: z.string().min(1).max(64),
-    cron: z.string().regex(/^(\*|[0-9,\-\/]+)\s+(\*|[0-9,\-\/]+)\s+(\*|[0-9,\-\/]+)\s+(\*|[0-9,\-\/]+)\s+(\*|[0-9,\-\/]+)$/),
+    cron: z.string().regex(/^(\*|[0-9,\-/]+)\s+(\*|[0-9,\-/]+)\s+(\*|[0-9,\-/]+)\s+(\*|[0-9,\-/]+)\s+(\*|[0-9,\-/]+)$/),
     message: z.string().min(1).max(4096),
     channel: z.string().min(1).max(64).optional(),
   }, async (args) => {

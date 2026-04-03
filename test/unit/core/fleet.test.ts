@@ -68,7 +68,7 @@ vi.mock('../../../src/core/runtime/index.js', () => ({
     };
   }),
   isOpenClawRuntime: vi.fn((runtime: unknown) =>
-    runtime != null && typeof runtime === 'object' && 'bindChannel' in runtime && 'unbindChannel' in runtime && 'setConfig' in runtime,
+    runtime !== null && runtime !== undefined && typeof runtime === 'object' && 'bindChannel' in runtime && 'unbindChannel' in runtime && 'setConfig' in runtime,
   ),
   buildContainerNamesFromConfig: vi.fn(() => new Map()),
 }));
