@@ -810,6 +810,63 @@ export async function importFromOpenClaw(
   return result;
 }
 
+// ── Fleet Sync ────────────────────────────────────────────────────────
+
+/**
+ * Sync agent statuses in BSCS config from live gateway state.
+ * For each OpenClaw agent, queries the gateway and updates the config
+ * status to match the actual runtime status.
+ */
+export async function syncFleetStatus(options: { dryRun?: boolean } = {}): Promise<{ updated: string[]; unchanged: string[]; errors: string[] }> {
+  const config = loadConfig();
+  const updated: string[] = [];
+  const unchanged: string[] = [];
+  const errors: string[] = [];
+
+  if (!config.agents) return { updated, unchanged, errors };
+
+  for (const [name, agentConfig] of Object.entries(config.agents)) {
+    if (!agentConfig) {
+      unchanged.push(name);
+      continue;
+    }
+
+    if (agentConfig.runtime !== 'openclaw' || !agentConfig.openclaw?.gatewayUrl) {
+      unchanged.push(name);
+      continue;
+    }
+
+    try {
+      const ocRuntime = getRuntime('openclaw', { gatewayUrl: agentConfig.openclaw.gatewayUrl });
+      if (!isOpenClawRuntime(ocRuntime)) {
+        unchanged.push(name);
+        continue;
+      }
+      const runtimeStatus = await ocRuntime.status(name);
+      const liveStatus = runtimeStatus.status === 'running' ? 'running' : 'stopped';
+
+      if (agentConfig.status !== liveStatus) {
+        if (!options.dryRun) {
+          agentConfig.status = liveStatus;
+        }
+        updated.push(name);
+      } else {
+        unchanged.push(name);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push(`${name}: ${msg}`);
+      unchanged.push(name);
+    }
+  }
+
+  if (updated.length > 0 && !options.dryRun) {
+    saveConfig(config);
+  }
+
+  return { updated, unchanged, errors };
+}
+
 // ── Docker Import ─────────────────────────────────────────────────────
 
 export interface DockerImportResult {

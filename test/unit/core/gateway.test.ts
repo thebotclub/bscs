@@ -596,6 +596,229 @@ describe('Gateway module', () => {
     });
   });
 
+  describe('Anthropic request format conversion (buildAnthropicRequest)', () => {
+    const anthroConfig = () => ({
+      models: {
+        providers: {
+          anthropic: {
+            type: 'anthropic' as const,
+            apiKey: 'test-anthro-key',
+            enabled: true,
+            models: ['claude-sonnet-4-6'],
+          },
+        },
+        defaults: {},
+        fallbacks: {},
+      },
+    });
+
+    it('should extract system messages into top-level system field', async () => {
+      let capturedBody: Record<string, unknown> | undefined;
+      let capturedHeaders: Record<string, string> | undefined;
+      const { spy } = interceptOutboundFetch(async (_url, init) => {
+        capturedBody = JSON.parse(init!.body as string) as Record<string, unknown>;
+        capturedHeaders = extractHeaders(init);
+        return new Response(JSON.stringify({
+          id: 'msg_test',
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'hello' }],
+          model: 'claude-sonnet-4-6-20250401',
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 20, output_tokens: 5 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+
+      const { port, close } = await startTestGateway(anthroConfig());
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-6',
+            messages: [
+              { role: 'system', content: 'You are a helpful assistant.' },
+              { role: 'user', content: 'Hello!' },
+            ],
+          }),
+        });
+        expect(res.status).toBe(200);
+
+        // System message should be extracted to top-level field
+        expect(capturedBody!.system).toBe('You are a helpful assistant.');
+        // System message should NOT remain in the messages array
+        const messages = capturedBody!.messages as Array<{ role: string; content: unknown }>;
+        expect(messages.find(m => m.role === 'system')).toBeUndefined();
+        // Only the user message should remain
+        expect(messages).toHaveLength(1);
+        expect(messages[0]!.role).toBe('user');
+      } finally {
+        await close();
+        spy.mockRestore();
+      }
+    });
+
+    it('should convert plain string content to Anthropic text content blocks', async () => {
+      let capturedBody: Record<string, unknown> | undefined;
+      const { spy } = interceptOutboundFetch(async (_url, init) => {
+        capturedBody = JSON.parse(init!.body as string) as Record<string, unknown>;
+        return new Response(JSON.stringify({
+          id: 'msg_test',
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'response' }],
+          model: 'claude-sonnet-4-6-20250401',
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 15, output_tokens: 3 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+
+      const { port, close } = await startTestGateway(anthroConfig());
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-6',
+            messages: [
+              { role: 'user', content: 'Hello!' },
+              { role: 'assistant', content: 'Hi there!' },
+            ],
+          }),
+        });
+        expect(res.status).toBe(200);
+
+        const messages = capturedBody!.messages as Array<{ role: string; content: unknown }>;
+        expect(messages).toHaveLength(2);
+        // Each message content should be converted to [{type: "text", text: "..."}]
+        expect(messages[0]!.content).toEqual([{ type: 'text', text: 'Hello!' }]);
+        expect(messages[1]!.content).toEqual([{ type: 'text', text: 'Hi there!' }]);
+      } finally {
+        await close();
+        spy.mockRestore();
+      }
+    });
+
+    it('should pass through already-array content blocks unchanged', async () => {
+      let capturedBody: Record<string, unknown> | undefined;
+      const { spy } = interceptOutboundFetch(async (_url, init) => {
+        capturedBody = JSON.parse(init!.body as string) as Record<string, unknown>;
+        return new Response(JSON.stringify({
+          id: 'msg_test',
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'response' }],
+          model: 'claude-sonnet-4-6-20250401',
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 15, output_tokens: 3 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+
+      const { port, close } = await startTestGateway(anthroConfig());
+      try {
+        const multimodalContent = [
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'abcd' } },
+          { type: 'text', text: 'What is this?' },
+        ];
+        const res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-6',
+            messages: [
+              { role: 'user', content: multimodalContent },
+            ],
+          }),
+        });
+        expect(res.status).toBe(200);
+
+        const messages = capturedBody!.messages as Array<{ role: string; content: unknown }>;
+        expect(messages).toHaveLength(1);
+        // Already-array content should be passed through as-is
+        expect(messages[0]!.content).toEqual(multimodalContent);
+      } finally {
+        await close();
+        spy.mockRestore();
+      }
+    });
+
+    it('should send anthropic-version header 2025-04-01', async () => {
+      let capturedHeaders: Record<string, string> | undefined;
+      const { spy } = interceptOutboundFetch(async (_url, init) => {
+        capturedHeaders = extractHeaders(init);
+        return new Response(JSON.stringify({
+          id: 'msg_test',
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'ok' }],
+          model: 'claude-sonnet-4-6-20250401',
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 10, output_tokens: 2 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+
+      const { port, close } = await startTestGateway(anthroConfig());
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'claude-sonnet-4-6', messages: [{ role: 'user', content: 'test' }] }),
+        });
+        expect(res.status).toBe(200);
+        expect(capturedHeaders!['anthropic-version']).toBe('2025-04-01');
+      } finally {
+        await close();
+        spy.mockRestore();
+      }
+    });
+
+    it('should prefer explicit top-level system over extracted system messages', async () => {
+      let capturedBody: Record<string, unknown> | undefined;
+      const { spy } = interceptOutboundFetch(async (_url, init) => {
+        capturedBody = JSON.parse(init!.body as string) as Record<string, unknown>;
+        return new Response(JSON.stringify({
+          id: 'msg_test',
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'ok' }],
+          model: 'claude-sonnet-4-6-20250401',
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 10, output_tokens: 2 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+
+      const { port, close } = await startTestGateway(anthroConfig());
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-6',
+            system: 'Explicit system prompt',
+            messages: [
+              { role: 'system', content: 'Should be ignored in favor of top-level' },
+              { role: 'user', content: 'Hello' },
+            ],
+          }),
+        });
+        expect(res.status).toBe(200);
+        // Top-level system should take precedence
+        expect(capturedBody!.system).toBe('Explicit system prompt');
+        // System role should still be filtered out of messages
+        const messages = capturedBody!.messages as Array<{ role: string }>;
+        expect(messages.find(m => m.role === 'system')).toBeUndefined();
+      } finally {
+        await close();
+        spy.mockRestore();
+      }
+    });
+  });
+
   describe('Cost tracking with prefixed model names', () => {
     it('should record cost with the model name as used in the request', async () => {
       const { spy } = interceptOutboundFetch(async () => {

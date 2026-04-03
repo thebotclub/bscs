@@ -109,6 +109,7 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   'claude-opus-4': { input: 15.0, output: 75.0 },
   'claude-sonnet-4': { input: 3.0, output: 15.0 },
   'claude-sonnet-4-5': { input: 3.0, output: 15.0 },
+  'claude-sonnet-4-6': { input: 3.0, output: 15.0 },
   'claude-haiku-3.5': { input: 0.8, output: 4.0 },
   'gpt-4o': { input: 2.5, output: 10.0 },
   'gpt-4o-mini': { input: 0.15, output: 0.6 },
@@ -225,27 +226,58 @@ function buildAnthropicRequest(
   body: Record<string, unknown>,
 ): ProviderRequest {
   const model = body.model as string;
-  const messages = body.messages as Array<{ role: string; content: string }>;
+  const rawMessages = body.messages as Array<{ role: string; content: string | Array<{ type: string; text?: string }> }>;
   const maxTokens = (body.max_tokens as number) ?? 4096;
 
-  const payload: Record<string, unknown> = {
-      model,
-      messages,
-      max_tokens: maxTokens,
-    };
-    if (body.temperature !== undefined) payload.temperature = body.temperature;
-    if (body.stream !== undefined) payload.stream = body.stream;
-    if (body.system) payload.system = body.system;
+  // Extract system messages into top-level system field (Anthropic format)
+  const systemParts: string[] = [];
+  const nonSystemMessages: typeof rawMessages = [];
+  for (const msg of rawMessages) {
+    if (msg.role === 'system') {
+      // content may be a string or already an array of content blocks
+      if (typeof msg.content === 'string') {
+        systemParts.push(msg.content);
+      } else if (Array.isArray(msg.content)) {
+        systemParts.push(msg.content.map(b => b.text ?? '').filter(Boolean).join('\n'));
+      }
+    } else {
+      nonSystemMessages.push(msg);
+    }
+  }
 
-    return {
-      url: `${provider.baseUrl}/v1/messages`,
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': provider.apiKey ?? '',
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify(payload),
-    };
+  // Convert messages to Anthropic content-block format
+  const anthropicMessages = nonSystemMessages.map(msg => ({
+    role: msg.role,
+    content: typeof msg.content === 'string'
+      ? [{ type: 'text' as const, text: msg.content }]
+      : msg.content,
+  }));
+
+  const payload: Record<string, unknown> = {
+    model,
+    messages: anthropicMessages,
+    max_tokens: maxTokens,
+  };
+
+  // Use top-level system from body if explicitly provided; otherwise use extracted system messages
+  if (body.system) {
+    payload.system = body.system;
+  } else if (systemParts.length > 0) {
+    payload.system = systemParts.join('\n\n');
+  }
+
+  if (body.temperature !== undefined) payload.temperature = body.temperature;
+  if (body.stream !== undefined) payload.stream = body.stream;
+
+  return {
+    url: `${provider.baseUrl}/v1/messages`,
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': provider.apiKey ?? '',
+      'anthropic-version': '2025-04-01',
+    },
+    body: JSON.stringify(payload),
+  };
 }
 
 function buildOpenAIRequest(

@@ -3,6 +3,10 @@ import chalk from 'chalk';
 import { createFleetInitCommand, createFleetImportCommand } from './init.js';
 import { createFleetStatusCommand, createFleetReconcileCommand } from './status.js';
 import { startWatchdogDaemon, checkHealth, type HealthCheckResult } from '../../core/watchdog.js';
+import { syncFleetStatus } from '../../core/fleet.js';
+import { formatTable } from '../../util/output.js';
+import { loadConfig } from '../../core/config.js';
+import { withErrorHandler } from '../../util/errors.js';
 
 function createFleetWatchdogCommand(): Command {
   return new Command('watchdog')
@@ -63,6 +67,61 @@ function createFleetWatchdogCommand(): Command {
     });
 }
 
+function createFleetSyncCommand(): Command {
+  return new Command('sync')
+    .description('Update agent statuses from live gateway state')
+    .option('--dry-run', 'Show changes without writing config')
+    .option('--json', 'Output as JSON')
+    .action(async (options: { dryRun?: boolean; json?: boolean }) => {
+      await withErrorHandler(async () => {
+        const result = await syncFleetStatus({ dryRun: options.dryRun });
+
+        if (options.json) {
+          console.log(JSON.stringify(result, null, 2));
+          return;
+        }
+
+        if (result.updated.length === 0 && result.errors.length === 0) {
+          console.log(chalk.green('\n✓ All agent statuses in sync\n'));
+          return;
+        }
+
+        console.log();
+        console.log(chalk.bold.cyan('🔄 Fleet Sync'));
+        if (options.dryRun) console.log(chalk.dim('   (dry-run)'));
+        console.log();
+
+        if (result.updated.length > 0) {
+          const config = loadConfig();
+          const rows = result.updated.map((name) => {
+            const currentStatus = config.agents?.[name]?.status || 'unknown';
+            // In dry-run mode the config still has the old value
+            return [name, currentStatus, chalk.green('live')];
+          });
+          console.log(formatTable(['Agent', 'Config Status', '→ Live Status'], rows));
+          console.log();
+        }
+
+        if (result.unchanged.length > 0) {
+          console.log(chalk.dim(`  ${result.unchanged.length} unchanged`));
+        }
+
+        if (result.errors.length > 0) {
+          console.log();
+          for (const err of result.errors) {
+            console.log(chalk.yellow(`  ⚠ ${err}`));
+          }
+        }
+
+        if (options.dryRun && result.updated.length > 0) {
+          console.log(chalk.dim('\nRun without --dry-run to apply.\n'));
+        } else if (result.updated.length > 0) {
+          console.log(chalk.green(`\n✓ Updated ${result.updated.length} agent status(es)\n`));
+        }
+      });
+    });
+}
+
 export function createFleetCommand(): Command {
   const command = new Command('fleet')
     .description('Manage the agent fleet');
@@ -71,6 +130,7 @@ export function createFleetCommand(): Command {
   command.addCommand(createFleetImportCommand());
   command.addCommand(createFleetStatusCommand());
   command.addCommand(createFleetReconcileCommand());
+  command.addCommand(createFleetSyncCommand());
   command.addCommand(createFleetWatchdogCommand());
   
   return command;

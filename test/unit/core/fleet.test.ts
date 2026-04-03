@@ -659,4 +659,137 @@ describe('Core Fleet Module', () => {
       expect(mockOcRuntime.destroy).not.toHaveBeenCalled();
     });
   });
+
+  describe('syncFleetStatus', () => {
+    it('should update agent status from running to stopped', async () => {
+      const { syncFleetStatus } = await import('../../../src/core/fleet.js');
+
+      saveConfig({
+        version: '1.0',
+        agents: {
+          'oc-agent': {
+            name: 'oc-agent',
+            status: 'running',
+            runtime: 'openclaw',
+            openclaw: { gatewayUrl: 'http://localhost:18777' },
+          },
+        },
+      });
+
+      mockOcRuntime.status.mockResolvedValueOnce({ name: 'oc-agent', status: 'stopped' });
+
+      const result = await syncFleetStatus();
+      expect(result.updated).toEqual(['oc-agent']);
+      expect(result.unchanged).toEqual([]);
+      expect(result.errors).toEqual([]);
+
+      // Verify config was written
+      const config = loadConfig();
+      expect(config.agents!['oc-agent']!.status).toBe('stopped');
+    });
+
+    it('should update agent status from stopped to running', async () => {
+      const { syncFleetStatus } = await import('../../../src/core/fleet.js');
+
+      saveConfig({
+        version: '1.0',
+        agents: {
+          'oc-agent': {
+            name: 'oc-agent',
+            status: 'stopped',
+            runtime: 'openclaw',
+            openclaw: { gatewayUrl: 'http://localhost:18777' },
+          },
+        },
+      });
+
+      mockOcRuntime.status.mockResolvedValueOnce({ name: 'oc-agent', status: 'running' });
+
+      const result = await syncFleetStatus();
+      expect(result.updated).toEqual(['oc-agent']);
+      expect(result.unchanged).toEqual([]);
+
+      const config = loadConfig();
+      expect(config.agents!['oc-agent']!.status).toBe('running');
+    });
+
+    it('should skip non-openclaw agents', async () => {
+      const { syncFleetStatus } = await import('../../../src/core/fleet.js');
+
+      saveConfig({
+        version: '1.0',
+        agents: {
+          'docker-agent': {
+            name: 'docker-agent',
+            status: 'running',
+            runtime: 'docker',
+          },
+          'native-agent': {
+            name: 'native-agent',
+            status: 'stopped',
+            runtime: 'native',
+          },
+        },
+      });
+
+      const result = await syncFleetStatus();
+      expect(result.updated).toEqual([]);
+      expect(result.unchanged).toEqual(['docker-agent', 'native-agent']);
+      expect(result.errors).toEqual([]);
+    });
+
+    it('should not write config in dry-run mode', async () => {
+      const { syncFleetStatus } = await import('../../../src/core/fleet.js');
+
+      saveConfig({
+        version: '1.0',
+        agents: {
+          'oc-agent': {
+            name: 'oc-agent',
+            status: 'running',
+            runtime: 'openclaw',
+            openclaw: { gatewayUrl: 'http://localhost:18777' },
+          },
+        },
+      });
+
+      mockOcRuntime.status.mockResolvedValueOnce({ name: 'oc-agent', status: 'stopped' });
+
+      const result = await syncFleetStatus({ dryRun: true });
+      expect(result.updated).toEqual(['oc-agent']);
+
+      // Config should NOT have been written
+      const config = loadConfig();
+      expect(config.agents!['oc-agent']!.status).toBe('running');
+    });
+
+    it('should handle errors gracefully', async () => {
+      const { syncFleetStatus } = await import('../../../src/core/fleet.js');
+
+      saveConfig({
+        version: '1.0',
+        agents: {
+          'oc-agent': {
+            name: 'oc-agent',
+            status: 'running',
+            runtime: 'openclaw',
+            openclaw: { gatewayUrl: 'http://localhost:18777' },
+          },
+        },
+      });
+
+      mockOcRuntime.status.mockRejectedValueOnce(new Error('Connection refused'));
+
+      const result = await syncFleetStatus();
+      expect(result.updated).toEqual([]);
+      expect(result.unchanged).toEqual(['oc-agent']);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]).toContain('oc-agent');
+      expect(result.errors[0]).toContain('Connection refused');
+
+      // Config should remain unchanged
+      const config = loadConfig();
+      expect(config.agents!['oc-agent']!.status).toBe('running');
+    });
+  });
 });
