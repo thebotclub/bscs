@@ -68,11 +68,9 @@ describe('Core Cost Module', () => {
   });
 
   describe('getBudgetStatus', () => {
-    it('should return budget status', () => {
+    it('should return null when no budget configured', () => {
       const status = getBudgetStatus();
-      expect(status).toHaveProperty('limit');
-      expect(status).toHaveProperty('spent');
-      expect(status).toHaveProperty('percent');
+      expect(status).toBeNull();
     });
   });
 

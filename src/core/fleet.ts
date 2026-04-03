@@ -2,12 +2,11 @@
  * Core fleet module — fleet init, status, reconcile, import.
  * Extracted from CLI files for independent testability.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
-import { dirname } from 'path';
+import { existsSync, readFileSync } from 'fs';
 import { execFileSync, execFile } from 'child_process';
 import { isLocalMachine } from '../util/network.js';
 import { homedir, userInfo } from 'os';
-import { loadConfig, saveConfig } from './config.js';
+import { loadConfig, saveConfig, type BscsConfig } from './config.js';
 import { sshExec } from '../util/ssh.js';
 import type { AgentConfig } from '../util/types.js';
 import {
@@ -554,11 +553,7 @@ export function initFleet(answers: InitAnswers): { configPath: string } {
     agents: {},
   };
 
-  const configDir = dirname(configPath);
-  if (!existsSync(configDir)) {
-    mkdirSync(configDir, { recursive: true });
-  }
-  writeFileSync(configPath, JSON.stringify(config, null, 2));
+  saveConfig(config as unknown as BscsConfig);
 
   logger.info({ configPath, fleetName: answers.fleetName }, 'Fleet initialized');
   return { configPath };
@@ -626,10 +621,6 @@ export function importFleetSh(fleetShPath: string): ImportResult {
     : 'imported-fleet';
 
   const configPath = getConfigPath();
-  const configDir = dirname(configPath);
-  if (!existsSync(configDir)) {
-    mkdirSync(configDir, { recursive: true });
-  }
 
   const config = {
     version: '1.0',
@@ -646,7 +637,7 @@ export function importFleetSh(fleetShPath: string): ImportResult {
     agents,
   };
 
-  writeFileSync(configPath, JSON.stringify(config, null, 2));
+  saveConfig(config as unknown as BscsConfig);
 
   logger.info(
     { configPath, agentCount: Object.keys(agents).length },
@@ -672,10 +663,6 @@ export function _setExecCommandForFleet(fn: typeof execFileSync): void {
   _execCommand = fn;
 }
 
-/** @deprecated Use _setExecCommandForFleet instead. Will be removed in a future release. */
-export function setExecCommandForFleet(fn: typeof execFileSync): void {
-  _execCommand = fn;
-}
 
 /**
  * Extract fallback model names from an agent details object.

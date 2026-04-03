@@ -218,14 +218,11 @@ export function setDailyBudget(amount: number): void {
 /**
  * Get budget status
  */
-export function getBudgetStatus(): { limit: number; spent: number; percent: number } {
-  const budget = loadDailyBudget() ?? 10;
+export function getBudgetStatus(): { limit: number; spent: number; percent: number } | null {
+  const budget = loadDailyBudget();
+  if (budget === undefined) return null;
   const today = getCostData('today');
   const spent = today.reduce((sum, e) => sum + e.cost, 0);
 
-  return {
-    limit: budget,
-    spent,
-    percent: (spent / budget) * 100,
-  };
+  return { limit: budget, spent, percent: (spent / budget) * 100 };
 }

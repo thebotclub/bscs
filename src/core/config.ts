@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
 import { homedir } from 'os';
 import { createLogger } from '../util/logger.js';
@@ -69,8 +69,9 @@ export function loadConfig(): BscsConfig {
   }
 
   // M-26: Return cached config if file mtime hasn't changed
+  let stat: ReturnType<typeof statSync> | undefined;
   try {
-    const stat = statSync(configPath);
+    stat = statSync(configPath);
     const mtime = stat.mtimeMs;
     if (cachedConfig && mtime === cachedConfigMtime) {
       return cachedConfig;
@@ -87,9 +88,10 @@ export function loadConfig(): BscsConfig {
     const config = BscsConfigSchema.parse(parsed);
 
     // Update cache
-    const stat = statSync(configPath);
     cachedConfig = config;
-    cachedConfigMtime = stat.mtimeMs;
+    if (stat) {
+      cachedConfigMtime = Number(stat.mtimeMs);
+    }
 
     logger.debug('Config loaded successfully');
     return config;
@@ -112,7 +114,9 @@ export function saveConfig(config: BscsConfig): void {
   
   try {
     const validated = BscsConfigSchema.parse(config);
-    writeFileSync(configPath, JSON.stringify(validated, null, 2));
+    const tmpPath = configPath + '.tmp';
+    writeFileSync(tmpPath, JSON.stringify(validated, null, 2));
+    renameSync(tmpPath, configPath);
     invalidateConfigCache();
     logger.debug('Config saved successfully');
   } catch (err) {

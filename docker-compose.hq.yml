@@ -18,9 +18,13 @@ services:
     # Set UID/GID in .env or via the shell before deploying:
     #   export UID=$(id -u) GID=$(id -g)
     user: "${UID:-0}:${GID:-0}"
+    environment:
+      - HOME=/home/bscs
+      - NODE_ENV=production
+      - LOG_LEVEL=${LOG_LEVEL:-info}
     # Override the volume mount — use the built dist, not a live bind-mount
     volumes:
-      - ${HOME}/.config/bscs:/root/.config/bscs:ro
+      - ${HOME}/.config/bscs:/home/bscs/.config/bscs:ro
 
 networks:
   bscs-net:

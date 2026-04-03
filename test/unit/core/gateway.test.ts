@@ -71,7 +71,7 @@ async function startTestGateway(config?: ReturnType<typeof defaultConfig>) {
   const { startGateway } = await import('../../../src/core/gateway.js');
   const port = 19900 + Math.floor(Math.random() * 100);
   const gw = await startGateway(port, '127.0.0.1');
-  return { port, close: () => gw.close() };
+  return { port, close: async () => { await gw.close(); } };
 }
 
 // Standard success response for provider mock
@@ -110,7 +110,7 @@ describe('Gateway module', () => {
       expect(data.status).toBe('ok');
       expect(data.gateway).toBe('bscs');
     } finally {
-      close();
+      await close();
     }
   });
 
@@ -120,7 +120,7 @@ describe('Gateway module', () => {
       const res = await fetch(`http://127.0.0.1:${port}/unknown`);
       expect(res.status).toBe(404);
     } finally {
-      close();
+      await close();
     }
   });
 
@@ -134,7 +134,7 @@ describe('Gateway module', () => {
       });
       expect(res.status).toBe(400);
     } finally {
-      close();
+      await close();
     }
   });
 
@@ -186,7 +186,7 @@ describe('Gateway module', () => {
         expect(providerCall).toBeDefined();
         expect(providerCall!.headers['authorization']).toBe('Bearer zai-key');
       } finally {
-        close();
+        await close();
         spy.mockRestore();
       }
     });
@@ -210,7 +210,7 @@ describe('Gateway module', () => {
         const providerCall = capturedHeaders.find(h => h['x-api-key'] === 'minimax-key');
         expect(providerCall).toBeDefined();
       } finally {
-        close();
+        await close();
         spy.mockRestore();
       }
     });
@@ -234,7 +234,7 @@ describe('Gateway module', () => {
         const providerCall = capturedHeaders.find(h => h['x-api-key'] === 'anthropic-key');
         expect(providerCall).toBeDefined();
       } finally {
-        close();
+        await close();
         spy.mockRestore();
       }
     });
@@ -260,7 +260,7 @@ describe('Gateway module', () => {
         expect(providerCall).toBeDefined();
         expect(providerCall!.headers['authorization']).toContain('Bearer');
       } finally {
-        close();
+        await close();
         spy.mockRestore();
       }
     });
@@ -312,7 +312,7 @@ describe('Gateway module', () => {
         const providerCall = capturedHeaders.find(h => h['x-api-key'] === 'anthropic-key');
         expect(providerCall).toBeDefined();
       } finally {
-        close();
+        await close();
         spy.mockRestore();
       }
     });
@@ -335,7 +335,7 @@ describe('Gateway module', () => {
         const providerCall = capturedHeaders.find(h => h['authorization'] === 'Bearer zai-key');
         expect(providerCall).toBeDefined();
       } finally {
-        close();
+        await close();
         spy.mockRestore();
       }
     });
@@ -359,7 +359,7 @@ describe('Gateway module', () => {
         const providerCall = capturedHeaders.find(h => h['authorization'] === 'Bearer c4140-key');
         expect(providerCall).toBeDefined();
       } finally {
-        close();
+        await close();
         spy.mockRestore();
       }
     });
@@ -432,7 +432,7 @@ describe('Gateway module', () => {
         // Cost recording should have been called on success
         expect(mockRecordCostEntry).toHaveBeenCalledTimes(1);
       } finally {
-        close();
+        await close();
         spy.mockRestore();
       }
     });
@@ -458,7 +458,7 @@ describe('Gateway module', () => {
         // Streaming now has fallback support — when all providers fail, returns 502
         expect(res.status).toBe(502);
       } finally {
-        close();
+        await close();
         spy.mockRestore();
       }
     });
@@ -480,7 +480,7 @@ describe('Gateway module', () => {
         });
         expect(res.status).toBe(200);
       } finally {
-        close();
+        await close();
         spy.mockRestore();
       }
     });
@@ -499,7 +499,7 @@ describe('Gateway module', () => {
         const data = await res.json() as Record<string, unknown>;
         expect((data.error as Record<string, unknown>).message).toContain('model');
       } finally {
-        close();
+        await close();
       }
     });
 
@@ -515,7 +515,7 @@ describe('Gateway module', () => {
         const data = await res.json() as Record<string, unknown>;
         expect((data.error as Record<string, unknown>).message).toContain('messages');
       } finally {
-        close();
+        await close();
       }
     });
 
@@ -531,7 +531,7 @@ describe('Gateway module', () => {
         const data = await res.json() as Record<string, unknown>;
         expect((data.error as Record<string, unknown>).message).toContain('messages');
       } finally {
-        close();
+        await close();
       }
     });
 
@@ -550,7 +550,7 @@ describe('Gateway module', () => {
         // Gateway now validates messages field and returns 400 when missing
         expect(res.status).toBe(400);
       } finally {
-        close();
+        await close();
         spy.mockRestore();
       }
     });
@@ -571,7 +571,7 @@ describe('Gateway module', () => {
         const data = await res.json() as Record<string, unknown>;
         expect(data.choices).toBeDefined();
       } finally {
-        close();
+        await close();
         spy.mockRestore();
       }
     });
@@ -591,7 +591,7 @@ describe('Gateway module', () => {
         const data = await res.json() as Record<string, unknown>;
         expect((data.error as Record<string, unknown>).message).toContain('Unknown model');
       } finally {
-        close();
+        await close();
       }
     });
   });
@@ -616,7 +616,7 @@ describe('Gateway module', () => {
         // chain is just body.model (the prefixed name)
         expect(entry.model).toBe('anthropic/claude-opus-4-6');
       } finally {
-        close();
+        await close();
         spy.mockRestore();
       }
     });

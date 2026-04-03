@@ -98,11 +98,16 @@ function createCostBudgetCommand(): Command {
     .description('Show current budget status')
     .action(() => {
       const status = getBudgetStatus();
+      if (status === null) {
+        console.log(chalk.yellow('\n  No daily budget configured.\n'));
+        console.log(chalk.dim('  Use "bscs cost budget set <amount>" to set one.\n'));
+        return;
+      }
       console.log(chalk.bold('\nBudget Status:\n'));
       console.log(chalk.cyan(`  Daily Limit: $${status.limit}`));
       console.log(chalk.cyan(`  Spent: $${status.spent.toFixed(4)}`));
       console.log(chalk.cyan(`  Usage: ${status.percent.toFixed(1)}%`));
-      
+
       if (status.percent >= 100) {
         console.log(chalk.red('  ⚠ Budget exceeded!'));
       } else if (status.percent >= 80) {

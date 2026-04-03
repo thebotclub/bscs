@@ -371,7 +371,7 @@ async function proxyRequest(
             status: response.status,
           }, 'Request completed');
 
-          // M-04: Some providers return 200 with an error body
+          // G-05: Treat 200+error body like a non-2xx — try next fallback
           const errorObj = responseJson.error as Record<string, unknown> | undefined;
           if (errorObj && typeof errorObj === 'object' && errorObj.message) {
             logger.warn({
@@ -379,7 +379,10 @@ async function proxyRequest(
               model: fallbackModel,
               provider: provider.name,
               error: errorObj.message,
-            }, 'Provider returned HTTP 200 with error body');
+            }, 'Provider returned HTTP 200 with error body, trying fallback');
+            lastStatus = 200;
+            lastError = String(errorObj.message);
+            continue; // try next fallback
           }
         } catch {
           // Non-JSON responses — still return them
@@ -422,20 +425,26 @@ async function proxyRequest(
 function readRequestBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    let size = 0;
     const MAX_BODY = 10 * 1024 * 1024; // 10MB limit
 
+    // G-06: Timeout to prevent slow-loris / stalled client connections
+    const timeout = setTimeout(() => {
+      req.destroy();
+      reject(new Error('Request body read timeout'));
+    }, 30_000);
+
     req.on('data', (chunk: Buffer) => {
-      size += chunk.length;
-      if (size > MAX_BODY) {
+      const total = chunks.reduce((sum, c) => sum + c.length, 0) + chunk.length;
+      if (total > MAX_BODY) {
+        clearTimeout(timeout);
         req.destroy();
         reject(new Error('Request body too large'));
         return;
       }
       chunks.push(chunk);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString()));
-    req.on('error', reject);
+    req.on('end', () => { clearTimeout(timeout); resolve(Buffer.concat(chunks).toString('utf-8')); });
+    req.on('error', (err) => { clearTimeout(timeout); reject(err); });
   });
 }
 
@@ -444,16 +453,16 @@ function readRequestBody(req: IncomingMessage): Promise<string> {
 export interface GatewayServer {
   port: number;
   server: Server;
-  close: () => void;
+  close: () => Promise<void>;
 }
 
 export async function startGateway(
   port: number = 18999,
   bind: string = '127.0.0.1',
 ): Promise<GatewayServer> {
-  let activeRequests = 0;
+  const activeResponses = new Set<import('http').ServerResponse>();
   const server = createServer(async (req, res) => {
-    activeRequests++;
+    activeResponses.add(res);
     // Health check
     if (req.url === '/health' || req.url === '/healthz') {
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -568,6 +577,12 @@ export async function startGateway(
                     // Track usage data from SSE events for cost recording
                     if (value) {
                       const chunk = new TextDecoder().decode(value);
+
+                      // G-03: Log mid-stream error events for visibility
+                      if (chunk.includes('"type":"error"')) {
+                        logger.warn({ agent: agentName, model: fallbackModel }, 'Stream contained error event from provider');
+                      }
+
                       if (chunk.includes('"usage"')) {
                         lastUsageData = chunk;
                       }
@@ -580,30 +595,35 @@ export async function startGateway(
                   // C-02: Record cost for streaming response
                   if (lastUsageData) {
                     try {
-                      // Extract usage from the last SSE event containing usage data
-                      const usageMatch = lastUsageData.match(/data:\s*(\{[\s\S]*\})/);
-                      if (usageMatch?.[1]) {
-                        const usageJson = JSON.parse(usageMatch[1]);
-                        const usage = extractUsage(usageJson, provider.type);
-                        const cost = estimateCost(fallbackModel, usage.inputTokens, usage.outputTokens);
-                        recordCostEntry({
-                          timestamp: new Date().toISOString(),
-                          agent: agentName,
-                          model: fallbackModel,
-                          provider: provider.name,
-                          inputTokens: usage.inputTokens,
-                          outputTokens: usage.outputTokens,
-                          cost,
-                        });
-                        logger.info({
-                          agent: agentName,
-                          model: fallbackModel,
-                          provider: provider.name,
-                          inputTokens: usage.inputTokens,
-                          outputTokens: usage.outputTokens,
-                          cost: cost.toFixed(6),
-                          streamed: true,
-                        }, 'Streaming request completed');
+                      // G-04: Parse SSE lines properly instead of using a greedy regex
+                      const lines = lastUsageData.split('\n');
+                      for (const line of lines.reverse()) {
+                        if (line.startsWith('data: ') && line.includes('"usage"')) {
+                          try {
+                            const usageJson = JSON.parse(line.slice(6));
+                            const usage = extractUsage(usageJson, provider.type);
+                            const cost = estimateCost(fallbackModel, usage.inputTokens, usage.outputTokens);
+                            recordCostEntry({
+                              timestamp: new Date().toISOString(),
+                              agent: agentName,
+                              model: fallbackModel,
+                              provider: provider.name,
+                              inputTokens: usage.inputTokens,
+                              outputTokens: usage.outputTokens,
+                              cost,
+                            });
+                            logger.info({
+                              agent: agentName,
+                              model: fallbackModel,
+                              provider: provider.name,
+                              inputTokens: usage.inputTokens,
+                              outputTokens: usage.outputTokens,
+                              cost: cost.toFixed(6),
+                              streamed: true,
+                            }, 'Streaming request completed');
+                          } catch { continue; }
+                          break;
+                        }
                       }
                     } catch {
                       // Non-parseable usage — skip cost tracking for this stream
@@ -660,38 +680,62 @@ export async function startGateway(
     res.end(JSON.stringify({ error: { message: 'Not found. Use POST /v1/chat/completions' } }));
   });
 
-  // Decrement active requests when each response finishes
+  // Track response lifecycle in the active set
   server.on('request', (_req, res) => {
     res.on('finish', () => {
-      activeRequests--;
+      activeResponses.delete(res);
     });
   });
 
-  const gracefulShutdown = (signal: string) => {
-    logger.info({ signal, activeRequests }, 'Received shutdown signal, stopping new connections');
-    server.close(() => {
-      logger.info('Gateway server closed');
-    });
+  let shutdownInProgress = false;
 
-    // Force exit after timeout if in-flight requests haven't drained
-    const forceTimeout = setTimeout(() => {
-      logger.warn({ activeRequests }, 'Graceful shutdown timed out, forcing exit');
-      process.exit(1);
-    }, 10_000);
+  const gracefulShutdown = (reason: string): Promise<void> => {
+    return new Promise((resolve) => {
+      if (shutdownInProgress) { resolve(); return; }
+      shutdownInProgress = true;
+      logger.info({ reason, activeResponses: activeResponses.size }, 'Graceful shutdown initiated');
 
-    // Check periodically if all requests have drained
-    const checkDrain = setInterval(() => {
-      if (activeRequests <= 0) {
-        clearInterval(checkDrain);
-        clearTimeout(forceTimeout);
-        logger.info('All in-flight requests completed, exiting');
-        process.exit(0);
+      // Close idle connections immediately, then stop accepting new ones
+      if (typeof server.closeAllConnections === 'function') {
+        server.closeAllConnections();
       }
-    }, 200);
+      server.close(() => {
+        logger.info('Server closed, waiting for in-flight requests');
+      });
+
+      // Safety timeout — force resolve after 2s
+      const safetyTimeout = setTimeout(() => {
+        logger.warn({ activeResponses: activeResponses.size }, 'Graceful shutdown timed out, resolving');
+        clearInterval(checkDrain);
+        resolve();
+      }, 2_000);
+
+      // Check periodically if all responses have drained
+      const checkDrain = setInterval(() => {
+        // Prune responses that ended without firing finish (G-02 race fix)
+        activeResponses.forEach(r => { if (r.writableEnded) activeResponses.delete(r); });
+
+        if (activeResponses.size === 0) {
+          clearInterval(checkDrain);
+          clearTimeout(safetyTimeout);
+          logger.info('All in-flight requests completed');
+          resolve();
+        }
+      }, 100);
+    });
   };
 
-  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+  // Register SIGTERM/SIGINT handlers once (G-01 guard)
+  let signalsRegistered = false;
+
+  const registerSignalHandlers = () => {
+    if (signalsRegistered) return;
+    signalsRegistered = true;
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM').then(() => process.exit(0)));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT').then(() => process.exit(0)));
+  };
+
+  registerSignalHandlers();
 
   return new Promise((resolve) => {
     server.listen(port, bind, () => {
@@ -699,9 +743,7 @@ export async function startGateway(
       resolve({
         port,
         server,
-        close: () => {
-          gracefulShutdown('manual');
-        },
+        close: () => gracefulShutdown('manual'),
       });
     });
   });

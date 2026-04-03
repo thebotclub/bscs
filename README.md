@@ -167,7 +167,7 @@ An OpenAI-compatible proxy that sits between your agents and LLM providers, prov
 
 - **Retries** with exponential backoff and Retry-After header support
 - **Fallback chains** — automatically try the next model when one fails
-- **Multi-provider routing** — Anthropic, OpenAI, Google, Ollama, LiteLLM, llama.cpp
+- **Multi-provider routing** — Anthropic, OpenAI, Ollama, LiteLLM, llama.cpp (Google/Gemini not yet supported)
 - **Cost logging** — every request automatically records usage to JSONL
 - **Streaming passthrough** for SSE responses
 
@@ -416,7 +416,7 @@ When creating a coding agent (`--role coding`), BSCS automatically:
 - **Logging:** pino (structured JSON, `op://` secret redaction)
 - **UI:** Preact + HTM + @preact/signals, esbuild-bundled
 - **MCP:** @modelcontextprotocol/sdk (stdio transport)
-- **Testing:** Vitest (349 tests, ~2s)
+- **Testing:** Vitest (424 tests, ~2.5s)
 
 ## Docker
 
@@ -450,7 +450,7 @@ npm run lint
 npm run typecheck
 
 # Run tests
-npm test                         # Unit tests (349 tests)
+npm test                         # Unit tests (424 tests)
 npm run test:integration         # Integration tests (requires Docker)
 npm run test:e2e                 # End-to-end tests
 npm run test:coverage            # With coverage report
@@ -522,6 +522,47 @@ Adjust port range in config:
 ```json
 { "defaults": { "portRange": { "start": 18000, "end": 18999 } } }
 ```
+
+</details>
+
+<details>
+<summary><strong>Gateway returns 502 "All providers failed"</strong></summary>
+
+All models in the fallback chain returned errors. Debug:
+```bash
+# Check gateway logs
+docker logs bscs-gateway --tail 50
+
+# Test individual provider directly
+curl -s http://127.0.0.1:18999/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hello"}]}'
+```
+
+Common causes:
+- Expired or invalid API key in `~/.config/bscs/config.json`
+- Provider rate limited (429) — gateway retries 3x with backoff
+- Provider endpoint unreachable — check network/DNS
+
+</details>
+
+<details>
+<summary><strong>Per-agent cost tracking shows "unknown"</strong></summary>
+
+Agents must send the `x-bscs-agent` header for per-agent cost attribution:
+```bash
+# In agent config, add the header:
+OPENAI_EXTRA_HEADERS='{"x-bscs-agent":"atlas"}'
+```
+
+Without this header, costs are logged under agent name `unknown`.
+
+</details>
+
+<details>
+<summary><strong>Graceful shutdown takes up to 10 seconds</strong></summary>
+
+The gateway drains in-flight requests before shutting down. `docker restart bscs-gateway` may take up to 10s. This is by design — it prevents request loss.
 
 </details>
 

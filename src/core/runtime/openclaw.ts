@@ -16,9 +16,9 @@ import type {
 
 const logger = createLogger('openclaw-runtime');
 
-/** Normalize an agent record from the OpenClaw CLI: prefer `id`, fall back to `name`. */
-function normalizeAgentName(raw: Record<string, unknown>): string {
-  return (raw.id as string) || (raw.name as string) || 'unknown';
+/** Normalize an agent record from the OpenClaw CLI: prefer `id`, fall back to `name`. Returns null if neither exists. */
+function normalizeAgentName(raw: Record<string, unknown>): string | null {
+  return (raw.id as string) || (raw.name as string) || null;
 }
 
 /** Consistent timeout for all health/status probes (ms). */
@@ -157,10 +157,12 @@ export class OpenClawRuntime implements OpenClawAgentRuntime {
       const output = this.exec('openclaw', ['agents', 'list', '--json'], { timeout: 10000 });
       const agents = JSON.parse(output);
       if (!Array.isArray(agents)) return [];
-      return agents.map((a: { id?: string; name?: string; enabled?: boolean }) => ({
-        name: normalizeAgentName(a as unknown as Record<string, unknown>),
-        status: (a.enabled !== false ? 'running' : 'stopped') as RuntimeStatus['status'],
-      }));
+      return agents
+        .map((a: { id?: string; name?: string; enabled?: boolean }) => ({
+          name: normalizeAgentName(a as unknown as Record<string, unknown>),
+          status: (a.enabled !== false ? 'running' : 'stopped') as RuntimeStatus['status'],
+        }))
+        .filter((entry): entry is { name: string; status: RuntimeStatus['status'] } => entry.name !== null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.warn({ err: msg }, 'Failed to list agents — gateway may be returning non-JSON content');
@@ -266,17 +268,19 @@ export class OpenClawRuntime implements OpenClawAgentRuntime {
       const output = this.exec('openclaw', ['agents', 'list', '--json'], { timeout: 10000 });
       const raw: Array<Record<string, unknown>> = JSON.parse(output);
       if (!Array.isArray(raw)) return [];
-      return raw.map((a) => ({
-        name: normalizeAgentName(a),
-        enabled: a.enabled !== false,
-        channels: Array.isArray(a.channels)
-          ? a.channels.map((c: { type: string; accountId?: string; id?: string }) => ({
-              type: c.type,
-              accountId: c.accountId || c.id || '',
-            }))
-          : undefined,
-        model: typeof a.model === 'string' ? a.model : undefined,
-      }));
+      return raw
+        .map((a) => ({
+          name: normalizeAgentName(a),
+          enabled: a.enabled !== false,
+          channels: Array.isArray(a.channels)
+            ? a.channels.map((c: { type: string; accountId?: string; id?: string }) => ({
+                type: c.type,
+                accountId: c.accountId || c.id || '',
+              }))
+            : undefined,
+          model: typeof a.model === 'string' ? a.model : undefined,
+        }))
+        .filter((entry): entry is typeof entry & { name: string } => entry.name !== null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.warn({ err: msg }, 'Failed to list agents — gateway may be returning non-JSON content');

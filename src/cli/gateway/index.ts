@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
-import { startGateway } from '../../core/gateway.js';
+import { startGateway, type GatewayServer } from '../../core/gateway.js';
 import { formatOutput } from '../../util/output.js';
 
 export function createGatewayStartCommand(): Command {
@@ -12,8 +12,15 @@ export function createGatewayStartCommand(): Command {
     .action(async (options: { port: string; bind: string; json?: boolean }) => {
       const port = parseInt(options.port, 10);
 
+      if (isNaN(port) || port < 1 || port > 65535) {
+        console.error(chalk.red(`Invalid port: ${options.port}`));
+        process.exit(1);
+      }
+
+      let gw: GatewayServer;
+
       if (options.json) {
-        const gw = await startGateway(port, options.bind);
+        gw = await startGateway(port, options.bind);
         console.log(formatOutput({ status: 'running', port: gw.port, bind: options.bind }, { json: true }));
       } else {
         console.log(chalk.bold.cyan('\n⚡ BSCS LLM Gateway\n'));
@@ -22,7 +29,7 @@ export function createGatewayStartCommand(): Command {
         console.log(chalk.dim('  Health:   GET  /health'));
         console.log();
 
-        const gw = await startGateway(port, options.bind);
+        gw = await startGateway(port, options.bind);
         console.log(
           chalk.green(`  ✓ Gateway running on http://${options.bind}:${gw.port}\n`)
         );
@@ -31,7 +38,13 @@ export function createGatewayStartCommand(): Command {
         console.log(chalk.dim('  Press Ctrl+C to stop\n'));
       }
 
-      // Keep process alive — graceful shutdown handled by startGateway (SIGINT/SIGTERM)
+      // Handle Ctrl+C gracefully — await close then let process exit naturally
+      const shutdown = async () => {
+        await gw.close();
+        process.exit(0);
+      };
+      process.on('SIGINT', shutdown);
+      process.on('SIGTERM', shutdown);
     });
 }
 

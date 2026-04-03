@@ -377,3 +377,168 @@ docker restart bscs-gateway
 bscs gateway status  # ✓ running on port 18999
 bscs fleet watchdog --once  # ✓ all 10 agents healthy
 ```
+
+---
+
+## Phase 2 Round 3: Performance, Reliability, and Documentation (2026-04-03)
+
+### Issues Fixed
+
+#### G-01: Graceful shutdown called process.exit() breaking tests and host process
+
+**Severity:** Critical — killed the entire Node process on shutdown, leaked into test suite.
+
+**Root cause:** `gracefulShutdown()` called `process.exit()` directly. Tests calling `gw.close()` triggered process exit, breaking subsequent tests. In production, this killed any other work in the same process.
+
+**Fix:** Changed `gracefulShutdown` to return a `Promise<void>`. Added guard flag to prevent duplicate handler registration. CLI now `await`s close before calling `process.exit(0)`.
+
+#### G-02: activeRequests counter could race or never drain
+
+**Severity:** High — could prevent clean gateway shutdown.
+
+**Root cause:** Numeric counter incremented synchronously but decremented on async `finish` event. If response never sent (server closing), counter stays above 0, causing shutdown to timeout.
+
+**Fix:** Replaced numeric counter with a `Set<ServerResponse>`. Shutdown checks each response's `writableEnded` property. Added 10s safety timeout.
+
+#### G-05: Provider returning 200 with error body didn't trigger fallback
+
+**Severity:** High — Anthropic sometimes returns 200 with `{error: {message: "..."}}` in overloaded states.
+
+**Root cause:** Gateway only logged a warning for 200+error responses but still returned them to the client.
+
+**Fix:** Changed to `continue` to the next fallback model when error body detected in 200 response.
+
+#### G-06: No request body timeout (slow loris vulnerability)
+
+**Severity:** Medium — client could hold connections open indefinitely.
+
+**Fix:** Added 30s timeout to `readRequestBody()`. Body size check (10MB) moved inside the reader to enforce limit during streaming read.
+
+#### C-01: Double statSync in loadConfig
+
+**Severity:** Medium — unnecessary I/O on every config load.
+
+**Fix:** Store stat result from cache check and reuse after load.
+
+#### C-02: saveConfig not atomic
+
+**Severity:** Medium — process crash mid-write could corrupt config file.
+
+**Fix:** Write to temp file (`.json.tmp`) then `renameSync` (atomic on most filesystems).
+
+#### R-01: normalizeAgentName returned 'unknown' masking bugs
+
+**Severity:** Medium — broken agent entries silently merged into one "unknown" agent.
+
+**Fix:** Return `null` for entries with no id/name. Callers skip null entries.
+
+#### F-04: Deprecated setExecCommandForFleet still exported
+
+**Severity:** Low — dead code and test confusion.
+
+**Fix:** Removed deprecated export. All usage updated to `_setExecCommandForFleet`.
+
+#### CS-04: getBudgetStatus hardcoded $10 default
+
+**Severity:** Low — silently invented a budget the user never set.
+
+**Fix:** Returns `null` when no budget configured. Callers handle null.
+
+#### CLI-03: Port NaN not validated in gateway CLI
+
+**Severity:** Low — `parseInt("abc")` → NaN would crash gateway.
+
+**Fix:** Added validation: NaN or out-of-range (1-65535) ports rejected with error message.
+
+#### D-02: HQ compose mounted config at /root/ but ran as non-root user
+
+**Severity:** Medium — non-root process couldn't read `/root/.config/bscs`.
+
+**Fix:** Added `HOME=/home/bscs` environment variable in container. Volume now maps to `/home/bscs/.config/bscs`. Node's `os.homedir()` respects the `HOME` env var.
+
+### Known Issues (Not Fixed — Requires Further Work)
+
+#### ISSUE-7: Repeated Anthropic 400 errors on claude-sonnet-4-6
+
+**Observed:** Gateway logs show repeated `status: 400` from Anthropic for `claude-sonnet-4-6` requests. Fallback to `zai/glm-5-turbo` works correctly.
+
+**Likely cause:** API key permissions, rate limiting, or malformed request (possibly `system` prompt format).
+
+**Action needed:** Check Anthropic API key status, inspect full request body in gateway logs, verify system prompt format matches Anthropic's requirements.
+
+#### ISSUE-8: fleet status shows 3 agents stopped while watchdog shows all healthy
+
+**Observed:** `bscs fleet status` reports oracle, yield, hq-m as "stopped". `bscs fleet watchdog --once` reports all 10 as healthy.
+
+**Root cause:** `fleet status` reads the BSCS config file (written at import time). `fleet watchdog` queries the live OpenClaw gateway. The config was never updated after agents were toggled back on.
+
+**Action needed:** Either re-import fleet (`bscs fleet import --from-openclaw ...`) or implement a `fleet sync` command that updates config status from live state.
+
+#### ISSUE-9: Google/Gemini provider returns 501
+
+**Observed:** Any request for a Google model returns 501 Not Implemented.
+
+**Root cause:** `buildGoogleRequest()` was never implemented — only a stub exists.
+
+**Action needed:** Implement Google Gemini API translation or remove from supported provider list.
+
+### Code Annotation Reference
+
+Source code uses severity tags for issue tracking. Format: `// TAG-NN: description`
+
+| Prefix | Meaning | Example |
+|--------|---------|---------|
+| BUG-NN | Bug found and fixed | `// BUG-6: resolveProvider used prefix-based inference only` |
+| GOTCHA-NN | Deployment gotcha | `// GOTCHA-6: Docker bridge containers can't reach host-bound ports` |
+| ISSUE-NN | Known issue, not yet fixed | `// ISSUE-2: Skills not returned by agents list` |
+| G-NN | Gateway issue | `// G-01: gracefulShutdown calls process.exit()` |
+| F-NN | Fleet issue | `// F-01: Race condition in importFromOpenClaw` |
+| R-NN | Runtime issue | `// R-01: normalizeAgentName returns 'unknown'` |
+| C-NN | Config issue | `// C-01: Double statSync in loadConfig` |
+| CS-NN | Cost issue | `// CS-01: Fire-and-forget cost recording` |
+| D-NN | Docker issue | `// D-02: HQ compose mounts /root/ but runs as non-root` |
+| CLI-NN | CLI issue | `// CLI-01: Duplicated config logic` |
+| M-NN | Medium severity (from code review) | `// M-04: Non-retryable 200 with error body` |
+| H-NN | High severity (from code review) | `// H-04: importFromOpenClaw blocks event loop` |
+| L-NN | Low severity (from code review) | `// L-01: Unknown models returned 500` |
+| T-NN | Type safety issue | `// T-01: Multiple unsafe as casts` |
+| TQ-NN | Test quality issue | `// TQ-01: process.exit breaks test suite` |
+| CC-NN | Cross-cutting issue | `// CC-01: isLocalMachine calls execSync per invocation` |
+
+### Gateway Limits and Behavior
+
+| Setting | Value | Notes |
+|---------|-------|-------|
+| Max request body | 10 MB | Enforced during read, returns 413 |
+| Read timeout | 30s | Slow-loris protection |
+| Fetch timeout (per provider) | 120s | Per-request upstream timeout |
+| Retry count | 3 | Exponential backoff: 1s, 2s, 4s |
+| Graceful shutdown drain | 10s | Waits for in-flight requests |
+| Streaming error detection | Logging only | Mid-stream SSE errors logged but not retried |
+| Unknown model response | 400 | Returns `Unknown model: <name>` |
+| Google provider | 501 | Returns `Provider type 'google' not implemented` |
+
+### Per-Agent Cost Tracking
+
+The gateway uses the `x-bscs-agent` header for per-agent cost attribution. Agents should be configured to send this header when routing through the gateway:
+
+```bash
+# In OpenClaw agent config or environment:
+OPENAI_EXTRA_HEADERS='{"x-bscs-agent":"atlas"}'
+```
+
+Without this header, costs are logged under agent name `unknown`.
+
+### Docker Deployment Methods
+
+Two deployment methods exist — they produce different container configurations:
+
+| Aspect | `docker run` (manual) | `docker compose` |
+|--------|----------------------|------------------|
+| Image | `node:24-slim` | `node:22-slim` (dev) / `bscs-gateway:latest` (HQ) |
+| Code | Bind-mount live source | Built image or bind-mount |
+| Config | `-v ~/.config/bscs:/root/.config/bscs` | Volume mount with `HOME` env var |
+| User | root | `${UID}:${GID}` (non-root) |
+| Networks | Must manually connect | Managed by compose |
+
+For production, prefer `docker compose -f docker-compose.yml -f docker-compose.hq.yml up -d`.
