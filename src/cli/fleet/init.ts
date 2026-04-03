@@ -188,7 +188,7 @@ export function createFleetImportCommand(): Command {
 
         let result: import('../../core/fleet.js').OpenClawImportResult;
         try {
-          result = importFromOpenClaw(gatewayUrl, { apply: options.apply });
+          result = await importFromOpenClaw(gatewayUrl, { apply: options.apply });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           console.error(chalk.red(`Error: ${msg}`));

@@ -14,9 +14,13 @@ services:
     # HQ uses the locally-built image from the Dockerfile in this repo.
     # Build it first: docker build -t bscs-gateway:latest .
     image: bscs-gateway:latest
+    # Run as the host user so the read-only config volume (owned by hani) is accessible.
+    # Set UID/GID in .env or via the shell before deploying:
+    #   export UID=$(id -u) GID=$(id -g)
+    user: "${UID:-0}:${GID:-0}"
     # Override the volume mount — use the built dist, not a live bind-mount
     volumes:
-      - /home/hani/.config/bscs:/root/.config/bscs:ro
+      - ${HOME}/.config/bscs:/root/.config/bscs:ro
 
 networks:
   bscs-net:

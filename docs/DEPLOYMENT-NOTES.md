@@ -288,3 +288,92 @@ docker network connect docker-khadem_default bscs-gateway
 | Vector | vector-bot | Herald | `bscs/claude-sonnet-4-6` | sonnet → MiniMax-M2.7 → glm-5-turbo → qwen-72b |
 
 Sentinel agents (Warden, Clerk) bypass BSCS and use C4140 directly (local, free, no rate limits).
+
+---
+
+## Phase 2 Round 2: Gateway Resilience & Code Hardening (2026-04-03)
+
+### Bugs Fixed
+
+#### BUG-17: Streaming path had no fallback chain (C-02)
+
+**Severity:** Critical — streaming requests failed permanently if primary provider errored.
+
+**Root cause:** Streaming used a single `fetch()` with no retry or fallback logic. If the primary provider returned 429/500/503, the entire request failed.
+
+**Fix:** Added full fallback chain loop to streaming path matching the non-streaming behavior. On non-2xx from a provider, logs warning and tries the next model in the chain.
+
+#### BUG-18: Client disconnect during streaming didn't abort upstream (H-01)
+
+**Severity:** High — wasted API credits when client disconnected mid-stream.
+
+**Root cause:** No tracking of client connection state during streaming. Upstream provider continued generating tokens even after the client disconnected.
+
+**Fix:** Added `res.on('close')` listener that aborts the upstream `AbortController` and cancels the stream reader when the client disconnects.
+
+#### BUG-19: Streaming cost tracking missing (C-02)
+
+**Severity:** Medium — streaming responses weren't recorded in cost logs.
+
+**Root cause:** Streaming path didn't parse SSE events for usage data.
+
+**Fix:** Extract `usage` data from SSE events during streaming, calculate cost, and record to cost log.
+
+#### BUG-20: No request validation (C-03)
+
+**Severity:** Medium — malformed requests crashed the gateway or produced cryptic errors.
+
+**Fix:** Validate `model` is a non-empty string and `messages` is a non-empty array before processing. Return 400 with descriptive error.
+
+#### BUG-21: Unknown models returned 500 instead of 400 (L-01)
+
+**Severity:** Medium — debugging was harder when the gateway returned 500 for typos.
+
+**Fix:** When `resolveProvider()` returns null (unknown model), return 400 `Unknown model: <name>` instead of 500.
+
+#### BUG-22: Google/Gemini requests crashed with uncaught error (C-01)
+
+**Severity:** Medium — any request for a Google model crashed the process.
+
+**Fix:** Return 501 `Provider type 'google' not implemented` instead of throwing.
+
+#### BUG-23: Gateway logging was insufficient (M-01, M-03)
+
+**Severity:** Low — hard to debug production issues.
+
+**Fix:** Log incoming requests at info level (message count, model, agent). Log provider errors at warn level with status code.
+
+#### BUG-24: Cost tracking failed for prefixed model names (L-02)
+
+**Severity:** Medium — `bscs/claude-opus-4-6` didn't match pricing table because the lookup used the full prefixed name.
+
+**Fix:** Strip provider prefix before pricing lookup in `estimateCost()`.
+
+#### BUG-25: listAgents() didn't normalize id→name (BUG-11 regression)
+
+**Severity:** High — drift detection and fleet import broke when OpenClaw returned `id` instead of `name`.
+
+**Fix:** Normalize raw API response with `a.id || a.name || 'unknown'` in `listAgents()`, matching `list()` behavior.
+
+#### BUG-26: Runtime used curl subprocess for HTTP (M-10)
+
+**Severity:** Low — unnecessary subprocess spawn for HTTP requests.
+
+**Fix:** Replaced `curl` subprocess with native `fetch()` + `AbortController`.
+
+### Test Coverage Added
+
+- **13 new gateway tests:** streaming fallback chain (2), provider model list matching (4), prefix stripping (3), non-2xx fallback (1), request validation (3), unknown model (1), cost with prefixed names (1), client disconnect (1), streaming cost tracking (1)
+- **7 new fleet tests:** extractFallbacks fields (2), per-agent detail fetch for channels (2), enabled=false import (1), missing agents get response (1), orphan detection (1)
+- **Total: 424 tests passing**
+
+### Deployment (Round 2)
+
+```bash
+# HQ — pull latest, rebuild, restart gateway
+ssh hani@100.91.248.9
+cd ~/bscs && git stash && git pull && npm ci && npm run build && npm link --force
+docker restart bscs-gateway
+bscs gateway status  # ✓ running on port 18999
+bscs fleet watchdog --once  # ✓ all 10 agents healthy
+```

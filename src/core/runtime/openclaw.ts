@@ -16,6 +16,11 @@ import type {
 
 const logger = createLogger('openclaw-runtime');
 
+/** Normalize an agent record from the OpenClaw CLI: prefer `id`, fall back to `name`. */
+function normalizeAgentName(raw: Record<string, unknown>): string {
+  return (raw.id as string) || (raw.name as string) || 'unknown';
+}
+
 /** Consistent timeout for all health/status probes (ms). */
 const HEALTH_TIMEOUT_MS = 3000;
 
@@ -115,7 +120,7 @@ export class OpenClawRuntime implements OpenClawAgentRuntime {
       const output = this.exec('openclaw', ['agents', 'list', '--json'], { timeout: 10000 });
       const agents = JSON.parse(output);
       const agent = Array.isArray(agents)
-        ? agents.find((a: { id?: string; name?: string }) => (a.id || a.name) === name)
+        ? agents.find((a: { id?: string; name?: string }) => normalizeAgentName(a as unknown as Record<string, unknown>) === name)
         : null;
 
       if (!agent) {
@@ -128,8 +133,8 @@ export class OpenClawRuntime implements OpenClawAgentRuntime {
         status: enabled ? 'running' : 'stopped',
       };
     } catch {
-      // Fallback: if gateway is up, assume agent is running
-      return { name, status: res.ok ? 'running' : 'unknown' };
+      // Fallback: gateway healthz passed but agent list failed — assume running
+      return { name, status: 'running' };
     }
   }
 
@@ -152,8 +157,8 @@ export class OpenClawRuntime implements OpenClawAgentRuntime {
       const output = this.exec('openclaw', ['agents', 'list', '--json'], { timeout: 10000 });
       const agents = JSON.parse(output);
       if (!Array.isArray(agents)) return [];
-      return agents.map((a: { id: string; name?: string; enabled?: boolean }) => ({
-        name: a.id || a.name || 'unknown',
+      return agents.map((a: { id?: string; name?: string; enabled?: boolean }) => ({
+        name: normalizeAgentName(a as unknown as Record<string, unknown>),
         status: (a.enabled !== false ? 'running' : 'stopped') as RuntimeStatus['status'],
       }));
     } catch (err) {
@@ -262,7 +267,7 @@ export class OpenClawRuntime implements OpenClawAgentRuntime {
       const raw: Array<Record<string, unknown>> = JSON.parse(output);
       if (!Array.isArray(raw)) return [];
       return raw.map((a) => ({
-        name: (a.id as string) || (a.name as string) || 'unknown',
+        name: normalizeAgentName(a),
         enabled: a.enabled !== false,
         channels: Array.isArray(a.channels)
           ? a.channels.map((c: { type: string; accountId?: string; id?: string }) => ({

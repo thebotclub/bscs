@@ -4,7 +4,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
-import { execFileSync } from 'child_process';
+import { execFileSync, execFile } from 'child_process';
 import { isLocalMachine } from '../util/network.js';
 import { homedir, userInfo } from 'os';
 import { loadConfig, saveConfig } from './config.js';
@@ -138,10 +138,12 @@ export async function getFleetStatus(includeAll = true): Promise<FleetStatusResu
   // Matches openclaw_-prefixed containers OR custom-named containers from config
   const localContainerMap = new Map<string, ContainerInfo>();
   for (const c of localContainers) {
-    // Standard openclaw_ prefix
-    if (c.name.startsWith('openclaw_')) {
-      const agentName = c.name.replace('openclaw_', '');
-      localContainerMap.set(agentName, c);
+    // Known container name prefixes (openclaw_, docker-, oc-)
+    if (CONTAINER_NAME_PREFIXES.some((p) => c.name.startsWith(p))) {
+      const agentName = stripContainerPrefix(c.name);
+      if (agentName) {
+        localContainerMap.set(agentName, c);
+      }
     }
     // Custom container names registered in config
     for (const [agentName, containerName] of containerNames) {
@@ -336,6 +338,7 @@ export async function getFleetStatus(includeAll = true): Promise<FleetStatusResu
 export async function computeReconcileChanges(): Promise<ReconcileChange[]> {
   const config = loadConfig();
   const changes: ReconcileChange[] = [];
+  const listAgentsCache = new Map<string, Awaited<ReturnType<import('./runtime/openclaw.js').OpenClawRuntime['listAgents']>>>();
 
   // Docker agents — batch container comparison
   const containerNames = buildContainerNamesFromConfig(config.agents);
@@ -390,7 +393,11 @@ export async function computeReconcileChanges(): Promise<ReconcileChange[]> {
 
           // Config drift detection via gateway query
           if (isOpenClawRuntime(ocRuntime)) {
-            const liveAgents = await ocRuntime.listAgents();
+            const gwUrl = agentConfig.openclaw?.gatewayUrl || '';
+            if (!listAgentsCache.has(gwUrl)) {
+              listAgentsCache.set(gwUrl, await ocRuntime.listAgents());
+            }
+            const liveAgents = listAgentsCache.get(gwUrl)!;
             const liveAgent = liveAgents.find((a) => a.name === name);
             if (liveAgent) {
               // Channel binding mismatch
@@ -428,7 +435,10 @@ export async function computeReconcileChanges(): Promise<ReconcileChange[]> {
       try {
         const ocRuntime = getRuntime('openclaw', { gatewayUrl });
         if (isOpenClawRuntime(ocRuntime)) {
-          const liveAgents = await ocRuntime.listAgents();
+          if (!listAgentsCache.has(gatewayUrl)) {
+            listAgentsCache.set(gatewayUrl, await ocRuntime.listAgents());
+          }
+          const liveAgents = listAgentsCache.get(gatewayUrl)!;
           const configNames = new Set(Object.keys(config.agents));
           for (const live of liveAgents) {
             if (!configNames.has(live.name)) {
@@ -683,14 +693,14 @@ function extractFallbacks(agentDetails: Record<string, unknown> | null): string[
  * Import agents from an OpenClaw gateway into BSCS config.
  * Queries `openclaw agents list --json` and populates config entries.
  */
-export function importFromOpenClaw(
+export async function importFromOpenClaw(
   gatewayUrl: string,
   options: { apply?: boolean } = {},
-): OpenClawImportResult {
+): Promise<OpenClawImportResult> {
   const config = loadConfig();
   const result: OpenClawImportResult = { imported: [], skipped: [], errors: [] };
 
-  // Query the gateway for agent list
+  // Query the gateway for agent list (single sync call — fast)
   let agentsJson: string;
   try {
     agentsJson = _execCommand('openclaw', ['agents', 'list', '--json'], {
@@ -719,31 +729,45 @@ export function importFromOpenClaw(
 
   config.agents = config.agents || {};
 
-  for (const agent of agents) {
+  // Pre-filter: identify agents to import before fetching details
+  const toImport = agents.filter((agent) => {
     const name = (agent.id as string) || (agent.name as string);
     if (!name) {
       result.errors.push('Agent entry missing id/name — skipped');
-      continue;
+      return false;
     }
-
-    if (config.agents[name]) {
+    if (config.agents?.[name]) {
       result.skipped.push(name);
-      continue;
+      return false;
     }
+    return true;
+  });
 
-    // Fetch per-agent details (channels, fallback models) via agents get
-    let agentDetails: Record<string, unknown> | null = null;
+  // Fetch all per-agent details in parallel (async, non-blocking)
+  const detailPromises = toImport.map(async (agent) => {
+    const name = (agent.id as string) || (agent.name as string)!;
     try {
-      const detailsJson = _execCommand('openclaw', ['agents', 'get', '--json', name], {
-        encoding: 'utf-8',
-        timeout: 10000,
-        env: { ...process.env, OPENCLAW_GATEWAY: gatewayUrl },
+      const detailsJson = await new Promise<string>((resolve, reject) => {
+        execFile('openclaw', ['agents', 'get', '--json', name], {
+          encoding: 'utf-8',
+          timeout: 10000,
+          env: { ...process.env, OPENCLAW_GATEWAY: gatewayUrl },
+        }, (err, stdout) => {
+          if (err) reject(err);
+          else resolve(stdout);
+        });
       });
-      agentDetails = JSON.parse(detailsJson);
+      return { agent, details: JSON.parse(detailsJson) as Record<string, unknown> };
     } catch {
-      // Individual agent detail fetch failed — continue without channels/fallbacks
       logger.debug({ name }, 'Could not fetch agent details, skipping channel/fallback import');
+      return { agent, details: null };
     }
+  });
+
+  const detailResults = await Promise.all(detailPromises);
+
+  for (const { agent, details: agentDetails } of detailResults) {
+    const name = (agent.id as string) || (agent.name as string)!;
 
     // Extract channel bindings from the detailed response
     const rawChannels = agentDetails?.channels as Array<{ type: string; accountId?: string; id?: string }> | undefined;
@@ -766,7 +790,7 @@ export function importFromOpenClaw(
         model: agent.model ? { primary: agent.model as string, fallbacks: extractFallbacks(agentDetails) } : (agentDetails?.model ? { primary: String(agentDetails.model), fallbacks: extractFallbacks(agentDetails) } : undefined),
         identity: (agent.identityName && agent.identityEmoji)
           ? {
-              name: (agent.identityName as string).replace(/[\p{Emoji}\s]/gu, '').trim() || name,
+              name: (agent.identityName as string).replace(/^\p{Emoji}\s*/u, '').trim() || name,
               emoji: (agent.identityEmoji as string).trim(),
             }
           : undefined,
@@ -811,6 +835,23 @@ export interface DockerImportResult {
 const DOCKER_IGNORE_PREFIXES = ['bscs-', 'openmesh-', 'litellm-'];
 const DOCKER_IGNORE_NAMES = ['opengateway'];
 
+/** Known container name prefixes that should be stripped to derive agent names. */
+const CONTAINER_NAME_PREFIXES = ['openclaw_', 'docker-', 'oc-'];
+
+/**
+ * Strip a known container name prefix to derive the agent name.
+ * Only strips the first matching known prefix; returns the name unchanged
+ * if no known prefix matches (already stripped or unknown prefix).
+ */
+function stripContainerPrefix(name: string): string {
+  for (const prefix of CONTAINER_NAME_PREFIXES) {
+    if (name.startsWith(prefix)) {
+      return name.slice(prefix.length);
+    }
+  }
+  return name;
+}
+
 export async function importFromDocker(
   options: { apply?: boolean; exclude?: string[] } = {},
 ): Promise<DockerImportResult> {
@@ -830,8 +871,8 @@ export async function importFromDocker(
   for (const c of containers) {
     const containerName = c.name;
 
-    // Skip openclaw_-prefixed containers (managed by DockerRuntime default)
-    if (containerName.startsWith('openclaw_')) {
+    // Skip known-prefix containers (managed by DockerRuntime default)
+    if (CONTAINER_NAME_PREFIXES.some((p) => containerName.startsWith(p))) {
       continue;
     }
 

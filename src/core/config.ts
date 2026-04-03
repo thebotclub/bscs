@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
 import { homedir } from 'os';
 import { createLogger } from '../util/logger.js';
@@ -10,6 +10,15 @@ import {
 export type { BscsConfig };
 
 const logger = createLogger('config');
+
+// M-26: In-memory config cache keyed by file mtime
+let cachedConfig: BscsConfig | null = null;
+let cachedConfigMtime = 0;
+
+export function invalidateConfigCache(): void {
+  cachedConfig = null;
+  cachedConfigMtime = 0;
+}
 
 const DEFAULT_CONFIG: BscsConfig = {
   version: '1.0',
@@ -53,17 +62,35 @@ function getConfigPath(): string {
 
 export function loadConfig(): BscsConfig {
   const configPath = getConfigPath();
-  logger.debug({ configPath }, 'Loading config');
-  
+
   if (!existsSync(configPath)) {
     logger.debug('Config file not found, returning defaults');
     return DEFAULT_CONFIG;
   }
-  
+
+  // M-26: Return cached config if file mtime hasn't changed
+  try {
+    const stat = statSync(configPath);
+    const mtime = stat.mtimeMs;
+    if (cachedConfig && mtime === cachedConfigMtime) {
+      return cachedConfig;
+    }
+  } catch {
+    // stat failed — fall through to full load
+  }
+
+  logger.debug({ configPath }, 'Loading config');
+
   try {
     const raw = readFileSync(configPath, 'utf-8');
     const parsed = JSON.parse(raw);
     const config = BscsConfigSchema.parse(parsed);
+
+    // Update cache
+    const stat = statSync(configPath);
+    cachedConfig = config;
+    cachedConfigMtime = stat.mtimeMs;
+
     logger.debug('Config loaded successfully');
     return config;
   } catch (err) {
@@ -86,6 +113,7 @@ export function saveConfig(config: BscsConfig): void {
   try {
     const validated = BscsConfigSchema.parse(config);
     writeFileSync(configPath, JSON.stringify(validated, null, 2));
+    invalidateConfigCache();
     logger.debug('Config saved successfully');
   } catch (err) {
     logger.error({ err }, 'Failed to save config');

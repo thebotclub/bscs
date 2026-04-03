@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { execFile as execFileModule } from 'child_process';
 import { loadConfig, saveConfig } from '../../../src/core/config.js';
 
 // Mock docker
@@ -14,6 +15,16 @@ vi.mock('../../../src/core/docker.js', () => ({
   stopContainer: vi.fn().mockResolvedValue(undefined),
   removeContainer: vi.fn().mockResolvedValue(undefined),
 }));
+
+// Mock child_process.execFile for async importFromOpenClaw detail fetching
+const mockExecFile = vi.fn();
+vi.mock('child_process', async () => {
+  const actual = await vi.importActual<typeof import('child_process')>('child_process');
+  return {
+    ...actual,
+    execFile: mockExecFile,
+  };
+});
 
 // Helper to normalize raw OpenClaw API data (with id) to listAgents format (with name)
 function normalizeListAgents(raw: Array<Record<string, unknown>>): Array<{ name: string; enabled: boolean; channels?: Array<{ type: string; accountId: string }>; model?: string }> {
@@ -261,8 +272,17 @@ describe('Core Fleet Module', () => {
       ];
 
       _setExecCommandForFleet((() => JSON.stringify(mockAgents)) as any);
+      // execFile mock for per-agent detail fetching
+      mockExecFile.mockImplementation((cmd: string, args: string[], opts: Record<string, unknown>, cb: (err: Error | null, stdout: string) => void) => {
+        if (args?.includes('get')) {
+          const name = args[args.indexOf('get') + 1];
+          cb(null, JSON.stringify({ id: name }));
+        } else {
+          cb(new Error('unexpected'), '');
+        }
+      });
 
-      const result = importFromOpenClaw('http://localhost:18777', { apply: true });
+      const result = await importFromOpenClaw('http://localhost:18777', { apply: true });
       expect(result.imported).toEqual(['bot-alpha', 'bot-beta', 'bot-gamma']);
       expect(result.skipped).toEqual([]);
       expect(result.errors).toEqual([]);
@@ -293,8 +313,16 @@ describe('Core Fleet Module', () => {
       ];
 
       _setExecCommandForFleet((() => JSON.stringify(mockAgents)) as any);
+      mockExecFile.mockImplementation((cmd: string, args: string[], opts: Record<string, unknown>, cb: (err: Error | null, stdout: string) => void) => {
+        if (args?.includes('get')) {
+          const name = args[args.indexOf('get') + 1];
+          cb(null, JSON.stringify({ id: name }));
+        } else {
+          cb(new Error('unexpected'), '');
+        }
+      });
 
-      const result = importFromOpenClaw('http://localhost:18777', { apply: true });
+      const result = await importFromOpenClaw('http://localhost:18777', { apply: true });
       expect(result.imported).toEqual(['new-agent']);
       expect(result.skipped).toEqual(['existing']);
     });
@@ -306,7 +334,7 @@ describe('Core Fleet Module', () => {
 
       _setExecCommandForFleet((() => { throw new Error('Connection refused'); }) as any);
 
-      expect(() => importFromOpenClaw('http://localhost:18777')).toThrow('Failed to query OpenClaw gateway');
+      await expect(importFromOpenClaw('http://localhost:18777')).rejects.toThrow('Failed to query OpenClaw gateway');
     });
 
     it('should not write config in dry-run mode', async () => {
@@ -316,8 +344,12 @@ describe('Core Fleet Module', () => {
 
       const mockAgents = [{ id: 'test-agent' }];
       _setExecCommandForFleet((() => JSON.stringify(mockAgents)) as any);
+      mockExecFile.mockImplementation((cmd: string, args: string[], opts: Record<string, unknown>, cb: (err: Error | null, stdout: string) => void) => {
+        if (args?.includes('get')) cb(null, JSON.stringify({ id: 'test-agent' }));
+        else cb(new Error('unexpected'), '');
+      });
 
-      const result = importFromOpenClaw('http://localhost:18777'); // no apply
+      const result = await importFromOpenClaw('http://localhost:18777'); // no apply
       expect(result.imported).toEqual(['test-agent']);
 
       // Verify config was NOT written
@@ -348,10 +380,7 @@ describe('Core Fleet Module', () => {
 
       // Gateway says agent is running but channels differ
       mockOcRuntime.status.mockResolvedValueOnce({ name: 'drift-agent', status: 'running' });
-      mockListAgents
-        .mockResolvedValueOnce(normalizeListAgents([{ id: 'drift-agent', enabled: true, channels: [{ type: 'discord', accountId: 'dc1' }] }]))
-        // Second call for orphan check on same gateway
-        .mockResolvedValueOnce(normalizeListAgents([{ id: 'drift-agent', enabled: true }]));
+      mockListAgents.mockResolvedValueOnce(normalizeListAgents([{ id: 'drift-agent', enabled: true, channels: [{ type: 'discord', accountId: 'dc1' }] }]));
 
       const changes = await computeReconcileChanges();
       const rebind = changes.find((c) => c.action === 'rebind');
@@ -380,9 +409,8 @@ describe('Core Fleet Module', () => {
       });
 
       mockOcRuntime.status.mockResolvedValueOnce({ name: 'model-agent', status: 'running' });
-      mockListAgents
-        .mockResolvedValueOnce(normalizeListAgents([{ id: 'model-agent', enabled: true, model: 'claude-3' }]))
-        .mockResolvedValueOnce(normalizeListAgents([{ id: 'model-agent', enabled: true }]));
+      // With H-05 caching, only one listAgents call per gateway URL
+      mockListAgents.mockResolvedValueOnce(normalizeListAgents([{ id: 'model-agent', enabled: true, model: 'claude-3' }]));
 
       const changes = await computeReconcileChanges();
       const configUpdate = changes.find((c) => c.action === 'config-update');
@@ -411,9 +439,7 @@ describe('Core Fleet Module', () => {
       });
 
       mockOcRuntime.status.mockResolvedValueOnce({ name: 'same-model', status: 'running' });
-      mockListAgents
-        .mockResolvedValueOnce(normalizeListAgents([{ id: 'same-model', enabled: true, model: 'gpt-4' }]))
-        .mockResolvedValueOnce(normalizeListAgents([{ id: 'same-model', enabled: true }]));
+      mockListAgents.mockResolvedValueOnce(normalizeListAgents([{ id: 'same-model', enabled: true, model: 'gpt-4' }]));
 
       const changes = await computeReconcileChanges();
       expect(changes.filter((c) => c.action === 'config-update')).toHaveLength(0);
@@ -436,9 +462,7 @@ describe('Core Fleet Module', () => {
       });
 
       mockOcRuntime.status.mockResolvedValueOnce({ name: 'known-agent', status: 'running' });
-      // Per-agent listAgents call (no drift)
-      mockListAgents.mockResolvedValueOnce(normalizeListAgents([{ id: 'known-agent', enabled: true }]));
-      // Orphan check call — gateway has an extra agent
+      // With H-05 caching, single listAgents call per gateway URL covers both drift + orphan checks
       mockListAgents.mockResolvedValueOnce(normalizeListAgents([
         { id: 'known-agent', enabled: true },
         { id: 'rogue-agent', enabled: true },
@@ -456,30 +480,18 @@ describe('Core Fleet Module', () => {
     it('should extract fallbackModels field into model.fallbacks', async () => {
       saveConfig({ version: '1.0', agents: {} });
 
-      const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
+      const { importFromOpenClaw, _setExecCommandForFleet } = await import('../../../src/core/fleet.js');
 
       const mockAgentsList = [
         { id: 'test', model: 'gpt-4', enabled: true },
       ];
 
-      // agents get returns details with fallbackModels at top level
-      const mockAgentsGet = {
-        id: 'test',
-        model: 'gpt-4',
-        fallbackModels: ['model-b', 'model-c'],
-      };
+      _setExecCommandForFleet((() => JSON.stringify(mockAgentsList)) as any);
+      mockExecFile.mockImplementation((cmd: string, args: string[], opts: Record<string, unknown>, cb: (err: Error | null, stdout: string) => void) => {
+        cb(null, JSON.stringify({ id: 'test', model: 'gpt-4', fallbackModels: ['model-b', 'model-c'] }));
+      });
 
-      setExecCommandForFleet(((cmd: string, args: string[]) => {
-        if (args?.includes('list')) {
-          return JSON.stringify(mockAgentsList);
-        }
-        if (args?.includes('get')) {
-          return JSON.stringify(mockAgentsGet);
-        }
-        throw new Error('unexpected command');
-      }) as any);
-
-      const result = importFromOpenClaw('http://localhost:18777', { apply: true });
+      const result = await importFromOpenClaw('http://localhost:18777', { apply: true });
       expect(result.imported).toEqual(['test']);
 
       const config = loadConfig();
@@ -489,25 +501,18 @@ describe('Core Fleet Module', () => {
     it('should extract fallbacks field (alternate name) into model.fallbacks', async () => {
       saveConfig({ version: '1.0', agents: {} });
 
-      const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
+      const { importFromOpenClaw, _setExecCommandForFleet } = await import('../../../src/core/fleet.js');
 
       const mockAgentsList = [
         { id: 'test', enabled: true },
       ];
 
-      const mockAgentsGet = {
-        id: 'test',
-        model: 'gpt-4',
-        fallbacks: ['model-b', 'model-c'],
-      };
+      _setExecCommandForFleet((() => JSON.stringify(mockAgentsList)) as any);
+      mockExecFile.mockImplementation((cmd: string, args: string[], opts: Record<string, unknown>, cb: (err: Error | null, stdout: string) => void) => {
+        cb(null, JSON.stringify({ id: 'test', model: 'gpt-4', fallbacks: ['model-b', 'model-c'] }));
+      });
 
-      setExecCommandForFleet(((cmd: string, args: string[]) => {
-        if (args?.includes('list')) return JSON.stringify(mockAgentsList);
-        if (args?.includes('get')) return JSON.stringify(mockAgentsGet);
-        throw new Error('unexpected command');
-      }) as any);
-
-      const result = importFromOpenClaw('http://localhost:18777', { apply: true });
+      const result = await importFromOpenClaw('http://localhost:18777', { apply: true });
       expect(result.imported).toEqual(['test']);
 
       const config = loadConfig();
@@ -519,26 +524,18 @@ describe('Core Fleet Module', () => {
     it('should fetch agent details to populate channels', async () => {
       saveConfig({ version: '1.0', agents: {} });
 
-      const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
+      const { importFromOpenClaw, _setExecCommandForFleet } = await import('../../../src/core/fleet.js');
 
-      // agents list returns basic info (no channels)
       const mockAgentsList = [
         { id: 'test', model: 'gpt-4', enabled: true },
       ];
 
-      // agents get returns full details with channels
-      const mockAgentsGet = {
-        id: 'test',
-        channels: [{ type: 'telegram', accountId: '123' }],
-      };
+      _setExecCommandForFleet((() => JSON.stringify(mockAgentsList)) as any);
+      mockExecFile.mockImplementation((cmd: string, args: string[], opts: Record<string, unknown>, cb: (err: Error | null, stdout: string) => void) => {
+        cb(null, JSON.stringify({ id: 'test', channels: [{ type: 'telegram', accountId: '123' }] }));
+      });
 
-      setExecCommandForFleet(((cmd: string, args: string[]) => {
-        if (args?.includes('list')) return JSON.stringify(mockAgentsList);
-        if (args?.includes('get')) return JSON.stringify(mockAgentsGet);
-        throw new Error('unexpected command');
-      }) as any);
-
-      const result = importFromOpenClaw('http://localhost:18777', { apply: true });
+      const result = await importFromOpenClaw('http://localhost:18777', { apply: true });
       expect(result.imported).toEqual(['test']);
 
       const config = loadConfig();
@@ -550,15 +547,18 @@ describe('Core Fleet Module', () => {
     it('should set status to stopped when enabled is false', async () => {
       saveConfig({ version: '1.0', agents: {} });
 
-      const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
+      const { importFromOpenClaw, _setExecCommandForFleet } = await import('../../../src/core/fleet.js');
 
       const mockAgentsList = [
         { id: 'test', enabled: false },
       ];
 
-      setExecCommandForFleet((() => JSON.stringify(mockAgentsList)) as any);
+      _setExecCommandForFleet((() => JSON.stringify(mockAgentsList)) as any);
+      mockExecFile.mockImplementation((cmd: string, args: string[], opts: Record<string, unknown>, cb: (err: Error | null, stdout: string) => void) => {
+        cb(null, JSON.stringify({ id: 'test' }));
+      });
 
-      const result = importFromOpenClaw('http://localhost:18777', { apply: true });
+      const result = await importFromOpenClaw('http://localhost:18777', { apply: true });
       expect(result.imported).toEqual(['test']);
 
       const config = loadConfig();
@@ -570,19 +570,19 @@ describe('Core Fleet Module', () => {
     it('should still import agent when agents get throws', async () => {
       saveConfig({ version: '1.0', agents: {} });
 
-      const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
+      const { importFromOpenClaw, _setExecCommandForFleet } = await import('../../../src/core/fleet.js');
 
       const mockAgentsList = [
         { id: 'test', model: 'gpt-4', enabled: true },
       ];
 
-      setExecCommandForFleet(((cmd: string, args: string[]) => {
-        if (args?.includes('list')) return JSON.stringify(mockAgentsList);
-        if (args?.includes('get')) throw new Error('timeout');
-        throw new Error('unexpected command');
-      }) as any);
+      _setExecCommandForFleet((() => JSON.stringify(mockAgentsList)) as any);
+      // execFile mock throws for agents get — simulates timeout
+      mockExecFile.mockImplementation((cmd: string, args: string[], opts: Record<string, unknown>, cb: (err: Error | null, stdout: string) => void) => {
+        cb(new Error('timeout'), '');
+      });
 
-      const result = importFromOpenClaw('http://localhost:18777', { apply: true });
+      const result = await importFromOpenClaw('http://localhost:18777', { apply: true });
       expect(result.imported).toEqual(['test']);
       expect(result.errors).toEqual([]);
 

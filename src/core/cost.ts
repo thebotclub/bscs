@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, appendFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync } from 'fs';
+import { writeFile } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
 import { createLogger } from '../util/logger.js';
@@ -48,7 +49,9 @@ export function recordCostEntry(entry: CostEntry): void {
   const date = entry.timestamp.slice(0, 10); // YYYY-MM-DD
   const filePath = join(costDir, `${date}.jsonl`);
 
-  appendFileSync(filePath, JSON.stringify(entry) + '\n', 'utf-8');
+  writeFile(filePath, JSON.stringify(entry) + '\n', { flag: 'a' }).catch((err: unknown) => {
+    logger.error({ err: err instanceof Error ? err.message : String(err), filePath }, 'Failed to write cost entry');
+  });
   logger.debug({ agent: entry.agent, model: entry.model, cost: entry.cost }, 'Cost entry recorded');
 }
 

@@ -8,7 +8,7 @@
  * 3. Falls back through the configured fallback chain on failure
  * 4. Logs every request for cost tracking
  */
-import { createServer, type IncomingMessage } from 'http';
+import { createServer, type IncomingMessage, type Server } from 'http';
 import { createLogger } from '../util/logger.js';
 import { loadConfig } from './config.js';
 import { recordCostEntry } from './cost.js';
@@ -370,6 +370,17 @@ async function proxyRequest(
             cost: cost.toFixed(6),
             status: response.status,
           }, 'Request completed');
+
+          // M-04: Some providers return 200 with an error body
+          const errorObj = responseJson.error as Record<string, unknown> | undefined;
+          if (errorObj && typeof errorObj === 'object' && errorObj.message) {
+            logger.warn({
+              agent: agentName,
+              model: fallbackModel,
+              provider: provider.name,
+              error: errorObj.message,
+            }, 'Provider returned HTTP 200 with error body');
+          }
         } catch {
           // Non-JSON responses — still return them
         }
@@ -432,6 +443,7 @@ function readRequestBody(req: IncomingMessage): Promise<string> {
 
 export interface GatewayServer {
   port: number;
+  server: Server;
   close: () => void;
 }
 
@@ -439,7 +451,9 @@ export async function startGateway(
   port: number = 18999,
   bind: string = '127.0.0.1',
 ): Promise<GatewayServer> {
+  let activeRequests = 0;
   const server = createServer(async (req, res) => {
+    activeRequests++;
     // Health check
     if (req.url === '/health' || req.url === '/healthz') {
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -646,12 +660,48 @@ export async function startGateway(
     res.end(JSON.stringify({ error: { message: 'Not found. Use POST /v1/chat/completions' } }));
   });
 
+  // Decrement active requests when each response finishes
+  server.on('request', (_req, res) => {
+    res.on('finish', () => {
+      activeRequests--;
+    });
+  });
+
+  const gracefulShutdown = (signal: string) => {
+    logger.info({ signal, activeRequests }, 'Received shutdown signal, stopping new connections');
+    server.close(() => {
+      logger.info('Gateway server closed');
+    });
+
+    // Force exit after timeout if in-flight requests haven't drained
+    const forceTimeout = setTimeout(() => {
+      logger.warn({ activeRequests }, 'Graceful shutdown timed out, forcing exit');
+      process.exit(1);
+    }, 10_000);
+
+    // Check periodically if all requests have drained
+    const checkDrain = setInterval(() => {
+      if (activeRequests <= 0) {
+        clearInterval(checkDrain);
+        clearTimeout(forceTimeout);
+        logger.info('All in-flight requests completed, exiting');
+        process.exit(0);
+      }
+    }, 200);
+  };
+
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
   return new Promise((resolve) => {
     server.listen(port, bind, () => {
       logger.info({ port, bind }, 'LLM Gateway started');
       resolve({
         port,
-        close: () => server.close(),
+        server,
+        close: () => {
+          gracefulShutdown('manual');
+        },
       });
     });
   });

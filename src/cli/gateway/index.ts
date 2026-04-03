@@ -31,11 +31,7 @@ export function createGatewayStartCommand(): Command {
         console.log(chalk.dim('  Press Ctrl+C to stop\n'));
       }
 
-      // Keep process alive
-      process.on('SIGINT', () => {
-        console.log(chalk.dim('\n  Gateway stopped'));
-        process.exit(0);
-      });
+      // Keep process alive — graceful shutdown handled by startGateway (SIGINT/SIGTERM)
     });
 }
 

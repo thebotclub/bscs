@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync, readFileSync, mkdirSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { setTimeout as sleep } from 'timers/promises';
 
 // Test cost recording
 describe('recordCostEntry', () => {
@@ -40,6 +41,8 @@ describe('recordCostEntry', () => {
     };
 
     recordCostEntry(entry);
+    // Wait for async writeFile to complete
+    await sleep(50);
 
     const costDir = join(tempDir, 'costs');
     const filePath = join(costDir, '2025-01-15.jsonl');
@@ -74,9 +77,18 @@ describe('recordCostEntry', () => {
       outputTokens: 500,
       cost: 0.0105,
     });
+    // Wait for both async writeFile calls to complete
+    await sleep(100);
 
     const filePath = join(tempDir, 'costs', '2025-01-15.jsonl');
-    const lines = readFileSync(filePath, 'utf-8').trim().split('\n');
+    // Retry a few times in case writes are still flushing
+    let lines: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      if (!existsSync(filePath)) { await sleep(20); continue; }
+      lines = readFileSync(filePath, 'utf-8').trim().split('\n');
+      if (lines.length >= 2) break;
+      await sleep(20);
+    }
     expect(lines).toHaveLength(2);
 
     const first = JSON.parse(lines[0]!);
