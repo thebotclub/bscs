@@ -21,20 +21,29 @@ const HEALTH_TIMEOUT_MS = 3000;
 
 // Injectable types for testing
 export type ExecFn = (file: string, args: string[], opts?: object) => string;
-export type HttpFn = (url: string, opts?: { timeout?: number }) => Promise<{ ok: boolean; body: string }>;
+export type HttpFn = (url: string, opts?: { timeout?: number; signal?: AbortSignal }) => Promise<{ ok: boolean; body: string; status: number }>;
 
 const defaultExec: ExecFn = (file, args, opts) => execFileSync(file, args, { encoding: 'utf8', ...opts });
 
-function makeDefaultHttp(exec: ExecFn): HttpFn {
-  return async (url, opts) => {
+async function defaultHttp(url: string, opts?: { timeout?: number; signal?: AbortSignal }): Promise<{ ok: boolean; body: string; status: number }> {
+  try {
+    const timeout = opts?.timeout || HEALTH_TIMEOUT_MS;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    // Allow external signal (e.g. from parent context) to also abort
+    const combinedSignal = opts?.signal
+      ? AbortSignal.any([opts.signal, controller.signal])
+      : controller.signal;
     try {
-      const timeout = opts?.timeout || HEALTH_TIMEOUT_MS;
-      const res = exec('curl', ['-s', '--max-time', String(Math.ceil(timeout / 1000)), url], { timeout: timeout + 2000 });
-      return { ok: true, body: res };
-    } catch {
-      return { ok: false, body: '' };
+      const res = await fetch(url, { signal: combinedSignal });
+      const body = await res.text();
+      return { ok: res.ok, body, status: res.status };
+    } finally {
+      clearTimeout(timer);
     }
-  };
+  } catch {
+    return { ok: false, body: '', status: 0 };
+  }
 }
 
 export class OpenClawRuntime implements OpenClawAgentRuntime {
@@ -45,7 +54,7 @@ export class OpenClawRuntime implements OpenClawAgentRuntime {
   constructor(gatewayUrl?: string, exec?: ExecFn, http?: HttpFn) {
     this.gatewayUrl = gatewayUrl || 'http://127.0.0.1:18777';
     this.exec = exec || defaultExec;
-    this.http = http || makeDefaultHttp(this.exec);
+    this.http = http || defaultHttp;
   }
 
   async create(name: string, _config: AgentRuntimeConfig): Promise<CreateResult> {
@@ -147,7 +156,9 @@ export class OpenClawRuntime implements OpenClawAgentRuntime {
         name: a.id || a.name || 'unknown',
         status: (a.enabled !== false ? 'running' : 'stopped') as RuntimeStatus['status'],
       }));
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn({ err: msg }, 'Failed to list agents — gateway may be returning non-JSON content');
       return [];
     }
   }
@@ -204,7 +215,7 @@ export class OpenClawRuntime implements OpenClawAgentRuntime {
   async isAvailable(): Promise<boolean> {
     // Check CLI exists
     try {
-      this.exec('which', ['openclaw'], { timeout: 5000 });
+      this.exec('command', ['-v', 'openclaw'], { timeout: 5000 });
     } catch {
       return false;
     }
@@ -261,7 +272,9 @@ export class OpenClawRuntime implements OpenClawAgentRuntime {
           : undefined,
         model: typeof a.model === 'string' ? a.model : undefined,
       }));
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn({ err: msg }, 'Failed to list agents — gateway may be returning non-JSON content');
       return [];
     }
   }

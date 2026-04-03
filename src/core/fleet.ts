@@ -657,7 +657,12 @@ export interface OpenClawImportResult {
 
 let _execCommand: typeof execFileSync = execFileSync;
 
-/** Override exec for testing. */
+/** Override exec for testing. Internal — prefer _setExecCommandForFleet in tests. */
+export function _setExecCommandForFleet(fn: typeof execFileSync): void {
+  _execCommand = fn;
+}
+
+/** @deprecated Use _setExecCommandForFleet instead. Will be removed in a future release. */
 export function setExecCommandForFleet(fn: typeof execFileSync): void {
   _execCommand = fn;
 }
@@ -743,7 +748,7 @@ export function importFromOpenClaw(
     // Extract channel bindings from the detailed response
     const rawChannels = agentDetails?.channels as Array<{ type: string; accountId?: string; id?: string }> | undefined;
     const channels = Array.isArray(rawChannels)
-      ? rawChannels.map((c) => ({ type: c.type, accountId: c.accountId || c.id || '' }))
+      ? rawChannels.map((c) => ({ type: c.type as 'telegram' | 'discord', accountId: c.accountId || c.id || '' }))
       : [];
 
     const agentConfig: AgentConfig = {

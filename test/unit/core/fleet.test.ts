@@ -252,7 +252,7 @@ describe('Core Fleet Module', () => {
       // Set up initial config
       saveConfig({ version: '1.0', agents: {} });
 
-      const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
+      const { importFromOpenClaw, _setExecCommandForFleet } = await import('../../../src/core/fleet.js');
 
       const mockAgents = [
         { id: 'bot-alpha', workspace: 'alpha-ws', model: 'gpt-4', identityName: 'Alpha', identityEmoji: 'A' },
@@ -260,7 +260,7 @@ describe('Core Fleet Module', () => {
         { id: 'bot-gamma' },
       ];
 
-      setExecCommandForFleet((() => JSON.stringify(mockAgents)) as any);
+      _setExecCommandForFleet((() => JSON.stringify(mockAgents)) as any);
 
       const result = importFromOpenClaw('http://localhost:18777', { apply: true });
       expect(result.imported).toEqual(['bot-alpha', 'bot-beta', 'bot-gamma']);
@@ -285,14 +285,14 @@ describe('Core Fleet Module', () => {
         },
       });
 
-      const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
+      const { importFromOpenClaw, _setExecCommandForFleet } = await import('../../../src/core/fleet.js');
 
       const mockAgents = [
         { id: 'existing' },
         { id: 'new-agent' },
       ];
 
-      setExecCommandForFleet((() => JSON.stringify(mockAgents)) as any);
+      _setExecCommandForFleet((() => JSON.stringify(mockAgents)) as any);
 
       const result = importFromOpenClaw('http://localhost:18777', { apply: true });
       expect(result.imported).toEqual(['new-agent']);
@@ -302,9 +302,9 @@ describe('Core Fleet Module', () => {
     it('should throw on gateway unreachable', async () => {
       saveConfig({ version: '1.0', agents: {} });
 
-      const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
+      const { importFromOpenClaw, _setExecCommandForFleet } = await import('../../../src/core/fleet.js');
 
-      setExecCommandForFleet((() => { throw new Error('Connection refused'); }) as any);
+      _setExecCommandForFleet((() => { throw new Error('Connection refused'); }) as any);
 
       expect(() => importFromOpenClaw('http://localhost:18777')).toThrow('Failed to query OpenClaw gateway');
     });
@@ -312,10 +312,10 @@ describe('Core Fleet Module', () => {
     it('should not write config in dry-run mode', async () => {
       saveConfig({ version: '1.0', agents: {} });
 
-      const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
+      const { importFromOpenClaw, _setExecCommandForFleet } = await import('../../../src/core/fleet.js');
 
       const mockAgents = [{ id: 'test-agent' }];
-      setExecCommandForFleet((() => JSON.stringify(mockAgents)) as any);
+      _setExecCommandForFleet((() => JSON.stringify(mockAgents)) as any);
 
       const result = importFromOpenClaw('http://localhost:18777'); // no apply
       expect(result.imported).toEqual(['test-agent']);
@@ -449,6 +449,147 @@ describe('Core Fleet Module', () => {
       expect(orphaned).toBeDefined();
       expect(orphaned!.agent).toBe('rogue-agent');
       expect(orphaned!.reason).toContain('not in BSCS config');
+    });
+  });
+
+  describe('importFromOpenClaw — extractFallbacks', () => {
+    it('should extract fallbackModels field into model.fallbacks', async () => {
+      saveConfig({ version: '1.0', agents: {} });
+
+      const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
+
+      const mockAgentsList = [
+        { id: 'test', model: 'gpt-4', enabled: true },
+      ];
+
+      // agents get returns details with fallbackModels at top level
+      const mockAgentsGet = {
+        id: 'test',
+        model: 'gpt-4',
+        fallbackModels: ['model-b', 'model-c'],
+      };
+
+      setExecCommandForFleet(((cmd: string, args: string[]) => {
+        if (args?.includes('list')) {
+          return JSON.stringify(mockAgentsList);
+        }
+        if (args?.includes('get')) {
+          return JSON.stringify(mockAgentsGet);
+        }
+        throw new Error('unexpected command');
+      }) as any);
+
+      const result = importFromOpenClaw('http://localhost:18777', { apply: true });
+      expect(result.imported).toEqual(['test']);
+
+      const config = loadConfig();
+      expect(config.agents!['test']!.openclaw?.model?.fallbacks).toEqual(['model-b', 'model-c']);
+    });
+
+    it('should extract fallbacks field (alternate name) into model.fallbacks', async () => {
+      saveConfig({ version: '1.0', agents: {} });
+
+      const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
+
+      const mockAgentsList = [
+        { id: 'test', enabled: true },
+      ];
+
+      const mockAgentsGet = {
+        id: 'test',
+        model: 'gpt-4',
+        fallbacks: ['model-b', 'model-c'],
+      };
+
+      setExecCommandForFleet(((cmd: string, args: string[]) => {
+        if (args?.includes('list')) return JSON.stringify(mockAgentsList);
+        if (args?.includes('get')) return JSON.stringify(mockAgentsGet);
+        throw new Error('unexpected command');
+      }) as any);
+
+      const result = importFromOpenClaw('http://localhost:18777', { apply: true });
+      expect(result.imported).toEqual(['test']);
+
+      const config = loadConfig();
+      expect(config.agents!['test']!.openclaw?.model?.fallbacks).toEqual(['model-b', 'model-c']);
+    });
+  });
+
+  describe('importFromOpenClaw — per-agent detail fetch', () => {
+    it('should fetch agent details to populate channels', async () => {
+      saveConfig({ version: '1.0', agents: {} });
+
+      const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
+
+      // agents list returns basic info (no channels)
+      const mockAgentsList = [
+        { id: 'test', model: 'gpt-4', enabled: true },
+      ];
+
+      // agents get returns full details with channels
+      const mockAgentsGet = {
+        id: 'test',
+        channels: [{ type: 'telegram', accountId: '123' }],
+      };
+
+      setExecCommandForFleet(((cmd: string, args: string[]) => {
+        if (args?.includes('list')) return JSON.stringify(mockAgentsList);
+        if (args?.includes('get')) return JSON.stringify(mockAgentsGet);
+        throw new Error('unexpected command');
+      }) as any);
+
+      const result = importFromOpenClaw('http://localhost:18777', { apply: true });
+      expect(result.imported).toEqual(['test']);
+
+      const config = loadConfig();
+      expect(config.agents!['test']!.openclaw?.channels).toEqual([{ type: 'telegram', accountId: '123' }]);
+    });
+  });
+
+  describe('importFromOpenClaw — enabled=false', () => {
+    it('should set status to stopped when enabled is false', async () => {
+      saveConfig({ version: '1.0', agents: {} });
+
+      const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
+
+      const mockAgentsList = [
+        { id: 'test', enabled: false },
+      ];
+
+      setExecCommandForFleet((() => JSON.stringify(mockAgentsList)) as any);
+
+      const result = importFromOpenClaw('http://localhost:18777', { apply: true });
+      expect(result.imported).toEqual(['test']);
+
+      const config = loadConfig();
+      expect(config.agents!['test']!.status).toBe('stopped');
+    });
+  });
+
+  describe('importFromOpenClaw — missing agents get response', () => {
+    it('should still import agent when agents get throws', async () => {
+      saveConfig({ version: '1.0', agents: {} });
+
+      const { importFromOpenClaw, setExecCommandForFleet } = await import('../../../src/core/fleet.js');
+
+      const mockAgentsList = [
+        { id: 'test', model: 'gpt-4', enabled: true },
+      ];
+
+      setExecCommandForFleet(((cmd: string, args: string[]) => {
+        if (args?.includes('list')) return JSON.stringify(mockAgentsList);
+        if (args?.includes('get')) throw new Error('timeout');
+        throw new Error('unexpected command');
+      }) as any);
+
+      const result = importFromOpenClaw('http://localhost:18777', { apply: true });
+      expect(result.imported).toEqual(['test']);
+      expect(result.errors).toEqual([]);
+
+      // Agent should be imported with default values (no channels, no fallbacks)
+      const config = loadConfig();
+      expect(config.agents!['test']).toBeDefined();
+      expect(config.agents!['test']!.openclaw?.channels).toEqual([]);
     });
   });
 

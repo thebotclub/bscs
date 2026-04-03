@@ -1,7 +1,7 @@
 services:
   bscs-gateway:
     container_name: bscs-gateway
-    image: node:24-slim
+    image: node:22-slim
     working_dir: /app
     volumes:
       - .:/app
@@ -9,6 +9,8 @@ services:
     command: node dist/bin/bscs.js gateway start --port 18999 --bind 0.0.0.0
     ports:
       - "127.0.0.1:18999:18999"
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-info}
     restart: unless-stopped
     networks:
       - bscs-net

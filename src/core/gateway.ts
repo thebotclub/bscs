@@ -19,7 +19,7 @@ const logger = createLogger('gateway');
 // ── Provider URL mapping ─────────────────────────────────────────────
 
 const PROVIDER_ENDPOINTS: Record<ProviderType, string> = {
-  anthropic: 'https://api.anthropic.com/v1',
+  anthropic: 'https://api.anthropic.com',
   openai: 'https://api.openai.com/v1',
   google: 'https://generativelanguage.googleapis.com/v1beta',
   ollama: 'http://localhost:11434',
@@ -44,14 +44,14 @@ const MODEL_PROVIDER_MAP: Record<string, ProviderType> = {
   'gemini-': 'google',
 };
 
-function inferProviderFromModel(model: string): ProviderType {
+function inferProviderFromModel(model: string): ProviderType | null {
   for (const [prefix, provider] of Object.entries(MODEL_PROVIDER_MAP)) {
     if (model.startsWith(prefix)) return provider;
   }
-  return 'openai'; // default fallback
+  return null; // no prefix match
 }
 
-function resolveProvider(model: string): ResolvedProvider {
+function resolveProvider(model: string): ResolvedProvider | null {
   const config = loadConfig();
   const providers = config.models?.providers ?? {};
 
@@ -79,20 +79,23 @@ function resolveProvider(model: string): ResolvedProvider {
 
     // Fallback: prefix-based inference
     const inferredType = inferProviderFromModel(candidate);
-    for (const [name, provider] of Object.entries(providers)) {
-      if (provider.type === inferredType && provider.enabled) {
-        return {
-          name,
-          type: provider.type,
-          apiKey: provider.apiKey,
-          baseUrl: provider.baseUrl ?? PROVIDER_ENDPOINTS[provider.type],
-        };
+    if (inferredType) {
+      for (const [name, provider] of Object.entries(providers)) {
+        if (provider.type === inferredType && provider.enabled) {
+          return {
+            name,
+            type: provider.type,
+            apiKey: provider.apiKey,
+            baseUrl: provider.baseUrl ?? PROVIDER_ENDPOINTS[provider.type],
+          };
+        }
       }
     }
   }
 
-  // No configured provider — use defaults
+  // No configured provider — use defaults (only if we can infer a type)
   const inferredType = inferProviderFromModel(model);
+  if (!inferredType) return null;
   return {
     name: inferredType,
     type: inferredType,
@@ -116,7 +119,9 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
 };
 
 function estimateCost(model: string, inputTokens: number, outputTokens: number): number {
-  const pricing = MODEL_PRICING[model];
+  // Strip any provider prefix (e.g. "anthropic/claude-opus-4-6" → "claude-opus-4-6")
+  const strippedModel = model.includes('/') ? model.substring(model.indexOf('/') + 1) : model;
+  const pricing = MODEL_PRICING[strippedModel];
   if (!pricing) return 0;
   return (inputTokens / 1_000_000) * pricing.input + (outputTokens / 1_000_000) * pricing.output;
 }
@@ -265,7 +270,6 @@ function buildProviderRequest(
     case 'anthropic':
       return buildAnthropicRequest(provider, body);
     case 'openai':
-    case 'google':
     case 'ollama':
     case 'llamacpp':
     case 'litellm':
@@ -308,12 +312,24 @@ async function proxyRequest(
   const model = (body.model as string) ?? 'claude-sonnet-4';
   const fallbackChain = getFallbackChain(model);
 
+  // M-01: Log request summary
+  const messages = (body.messages as Array<{ role: string; content: string }>) ?? [];
+  const firstUserMsg = messages.find(m => m.role === 'user');
+  const msgPreview = firstUserMsg?.content?.slice(0, 100) ?? '(none)';
+  logger.info({ model, agent: agentName, messageCount: messages.length }, 'Incoming request');
+  logger.debug({ agent: agentName, model, firstUserMessagePreview: msgPreview }, 'Request content');
+
   let lastError: string = '';
   let lastStatus = 502;
 
   for (const fallbackModel of fallbackChain) {
     const currentBody = { ...body, model: fallbackModel };
     const provider = resolveProvider(fallbackModel);
+
+    if (!provider) {
+      logger.warn({ model: fallbackModel }, 'Skipping unresolvable model in fallback chain');
+      continue;
+    }
 
     logger.debug({ model: fallbackModel, provider: provider.name, agent: agentName }, 'Routing request');
 
@@ -437,51 +453,179 @@ export async function startGateway(
         const rawBody = await readRequestBody(req);
         const body = JSON.parse(rawBody) as Record<string, unknown>;
 
+        // C-03: Validate request body
+        if (!body.model || typeof body.model !== 'string' || body.model.trim() === '') {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: 'Missing or invalid "model" field in request body', type: 'invalid_request_error' } }));
+          return;
+        }
+        if (!Array.isArray(body.messages) || body.messages.length === 0) {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: 'Missing or invalid "messages" field in request body (must be a non-empty array)', type: 'invalid_request_error' } }));
+          return;
+        }
+
+        // L-01: Reject unknown models before proxying
+        const precheckProvider = resolveProvider(body.model as string);
+        if (!precheckProvider) {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: `Unknown model "${body.model}" — no provider configured and no prefix match found`, type: 'invalid_request_error' } }));
+          return;
+        }
+
+        // C-01: Reject google provider (not yet implemented)
+        if (precheckProvider.type === 'google') {
+          res.writeHead(501, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: `Google/Gemini provider is not yet supported through this gateway`, type: 'not_implemented' } }));
+          return;
+        }
+
         // Extract agent name from custom header or default
         const agentName = (req.headers['x-bscs-agent'] as string) ?? 'unknown';
 
-        // Streaming not yet supported through gateway — pass through
+        // Streaming path — uses fallback chain (C-02)
         if (body.stream === true) {
           const model = (body.model as string) ?? 'claude-sonnet-4';
-          const provider = resolveProvider(model);
-          const providerReq = buildProviderRequest(provider, body);
+          const fallbackChain = getFallbackChain(model);
 
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 120_000);
+          let streamSucceeded = false;
 
-          try {
-            const upstream = await fetch(providerReq.url, {
-              method: 'POST',
-              headers: providerReq.headers,
-              body: providerReq.body,
-              signal: controller.signal,
-            });
-            clearTimeout(timeout);
+          for (const fallbackModel of fallbackChain) {
+            const currentBody = { ...body, model: fallbackModel };
+            const provider = resolveProvider(fallbackModel);
 
-            res.writeHead(upstream.status, {
-              'content-type': upstream.headers.get('content-type') ?? 'text/event-stream',
-              'cache-control': 'no-cache',
-              connection: 'keep-alive',
-            });
-
-            if (upstream.body) {
-              const reader = (upstream.body as ReadableStream).getReader();
-              const pump = async () => {
-                while (true) {
-                  const { done, value } = await reader.read();
-                  if (done) break;
-                  res.write(value);
-                }
-                res.end();
-              };
-              pump().catch(() => res.end());
-            } else {
-              res.end();
+            if (!provider) {
+              logger.warn({ model: fallbackModel }, 'Skipping unresolvable model in streaming fallback chain');
+              continue;
             }
-          } catch {
-            clearTimeout(timeout);
+            if (provider.type === 'google') {
+              logger.warn({ model: fallbackModel }, 'Skipping google provider in streaming fallback chain (not implemented)');
+              continue;
+            }
+
+            const providerReq = buildProviderRequest(provider, currentBody);
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 120_000);
+
+            // H-01: Track client disconnection to abort upstream
+            const onClientClose = () => {
+              controller.abort();
+              clearTimeout(timeout);
+              logger.info({ agent: agentName, model: fallbackModel }, 'Client disconnected during stream');
+            };
+            res.on('close', onClientClose);
+
+            try {
+              const upstream = await fetch(providerReq.url, {
+                method: 'POST',
+                headers: providerReq.headers,
+                body: providerReq.body,
+                signal: controller.signal,
+              });
+              clearTimeout(timeout);
+
+              if (!upstream.ok) {
+                logger.warn({ model: fallbackModel, provider: provider.name, status: upstream.status }, 'Streaming provider returned error, trying fallback');
+                res.removeListener('close', onClientClose);
+                continue;
+              }
+
+              res.writeHead(upstream.status, {
+                'content-type': upstream.headers.get('content-type') ?? 'text/event-stream',
+                'cache-control': 'no-cache',
+                connection: 'keep-alive',
+              });
+
+              if (upstream.body) {
+                const reader = (upstream.body as ReadableStream).getReader();
+                let lastUsageData: string | null = null;
+
+                const pump = async () => {
+                  while (true) {
+                    // H-01: Check if client is still connected before each write
+                    if (res.writableEnded || res.destroyed) {
+                      logger.info({ agent: agentName, model: fallbackModel }, 'Client already disconnected, aborting stream pump');
+                      reader.cancel().catch(() => {});
+                      break;
+                    }
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    // Track usage data from SSE events for cost recording
+                    if (value) {
+                      const chunk = new TextDecoder().decode(value);
+                      if (chunk.includes('"usage"')) {
+                        lastUsageData = chunk;
+                      }
+                      res.write(value);
+                    }
+                  }
+                  res.end();
+                  res.removeListener('close', onClientClose);
+
+                  // C-02: Record cost for streaming response
+                  if (lastUsageData) {
+                    try {
+                      // Extract usage from the last SSE event containing usage data
+                      const usageMatch = lastUsageData.match(/data:\s*(\{[\s\S]*\})/);
+                      if (usageMatch?.[1]) {
+                        const usageJson = JSON.parse(usageMatch[1]);
+                        const usage = extractUsage(usageJson, provider.type);
+                        const cost = estimateCost(fallbackModel, usage.inputTokens, usage.outputTokens);
+                        recordCostEntry({
+                          timestamp: new Date().toISOString(),
+                          agent: agentName,
+                          model: fallbackModel,
+                          provider: provider.name,
+                          inputTokens: usage.inputTokens,
+                          outputTokens: usage.outputTokens,
+                          cost,
+                        });
+                        logger.info({
+                          agent: agentName,
+                          model: fallbackModel,
+                          provider: provider.name,
+                          inputTokens: usage.inputTokens,
+                          outputTokens: usage.outputTokens,
+                          cost: cost.toFixed(6),
+                          streamed: true,
+                        }, 'Streaming request completed');
+                      }
+                    } catch {
+                      // Non-parseable usage — skip cost tracking for this stream
+                    }
+                  }
+                };
+                // M-03: Log stream pump errors instead of silently swallowing
+                pump().catch((err: unknown) => {
+                  res.removeListener('close', onClientClose);
+                  logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'Stream pump error');
+                  if (!res.writableEnded) res.end();
+                });
+              } else {
+                res.end();
+              }
+
+              streamSucceeded = true;
+              break;
+            } catch (err) {
+              clearTimeout(timeout);
+              res.removeListener('close', onClientClose);
+              const errMsg = err instanceof Error ? err.message : String(err);
+              logger.warn({ model: fallbackModel, provider: provider.name, error: errMsg }, 'Streaming provider failed, trying fallback');
+
+              // If headers already sent, we can't try another fallback
+              if (res.headersSent) {
+                if (!res.writableEnded) res.end();
+                break;
+              }
+              continue;
+            }
+          }
+
+          if (!streamSucceeded) {
             res.writeHead(502, { 'content-type': 'application/json' });
-            res.end(JSON.stringify({ error: { message: 'Upstream stream failed' } }));
+            res.end(JSON.stringify({ error: { message: 'All streaming providers failed', type: 'gateway_error', code: 'all_providers_failed' } }));
           }
           return;
         }
