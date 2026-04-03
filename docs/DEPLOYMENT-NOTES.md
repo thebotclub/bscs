@@ -175,11 +175,30 @@ Containers on Docker's default `bridge` network cannot reach ports bound by host
 
 **Fix:** Run the BSCS gateway as a Docker container with `--network bridge -p 18999:18999`. Docker's published port handling uses DNAT rules that work across bridge networks. Connect the gateway container to additional networks as needed (`docker network connect docker-khadem_default bscs-gateway`).
 
-#### GOTCHA-7: Custom DNS breaks Docker container name resolution
+#### GOTCHA-7: Default bridge network DNS is broken on HQ
 
-`vector-bot` has `/etc/resolv.conf` pointing to `8.8.8.8` instead of Docker's internal DNS (`127.0.0.11`). Container name resolution (`bscs-gateway`) doesn't work.
+HQ's default Docker `bridge` network has `"invalid Prefix"` in IPAM config, which breaks Docker's embedded DNS server (`127.0.0.11`). Container name resolution fails even when DNS is set to `127.0.0.11`. Custom networks (like `docker-khadem_default`) have working DNS.
 
-**Fix:** Use the gateway container's bridge IP directly (`172.17.0.4:18999`) instead of the container name. Note: this IP can change if the container is recreated. Consider assigning a static IP or fixing the DNS config.
+**Fix:** Created a custom bridge network `bscs-net` for inter-container DNS resolution:
+```bash
+docker network create bscs-net
+docker network connect bscs-net bscs-gateway
+```
+
+Moved `vector-bot` from the default bridge to `bscs-net` by updating `docker-compose.yml`:
+```yaml
+networks:
+  - bscs-net
+networks:
+  bscs-net:
+    external: true
+```
+
+**Note:** `khadem-bot` stays on `docker-khadem_default` (also a custom network with working DNS). The gateway is connected to all three networks: `bridge`, `bscs-net`, `docker-khadem_default`.
+
+#### GOTCHA-7b: Original Vector compose had hardcoded DNS override
+
+`docker-vector/docker-compose.yml` had `dns: [8.8.8.8, 8.8.4.4]` which prevented Docker's internal DNS from being used. Removed the `dns:` key entirely and used a custom network with working embedded DNS instead.
 
 #### GOTCHA-8: MiniMax uses Anthropic-compatible API, not OpenAI
 
@@ -211,7 +230,7 @@ docker network connect docker-khadem_default bscs-gateway
 |-----------|---------|-------------|
 | csuite-bots | host | `http://127.0.0.1:18999/v1` |
 | khadem-bot | docker-khadem_default | `http://bscs-gateway:18999/v1` |
-| vector-bot | bridge (custom DNS) | `http://172.17.0.4:18999/v1` |
+| vector-bot | bscs-net | `http://bscs-gateway:18999/v1` |
 
 ### Current Agent Routing (Post-Phase-2)
 
